@@ -2,10 +2,10 @@ import os
 import logging
 import asyncio
 import json
-import re
 from datetime import datetime
 from typing import Dict, List, Optional
-import aiohttp
+
+# Telegram Kütüphaneleri
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,162 +16,181 @@ from telegram.ext import (
     filters
 )
 
+# Selenium Kütüphaneleri
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
 # ==========================================
-# AYARLAR
+# AYARLAR (Token buraya)
 # ==========================================
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'TOKEN_BURAYA')
-ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')
-CHECK_INTERVAL = 60 # Saniye (Artık çok hızlı olduğu için 1 dakikada bir bakabilir)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'TOKEN_BURAYA_YAZ') 
+ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',') 
+CHECK_INTERVAL = 300  # 5 dakika
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 tracked_products: Dict[str, Dict] = {}
 
-class ZaraFastChecker:
-    """Tarayıcısız, Direkt API ile Işık Hızında Kontrol"""
+# ==========================================
+# OPTİMİZE EDİLMİŞ SELENIUM MOTORU
+# ==========================================
+def check_zara_stock_selenium(url: str):
+    """
+    Resimleri yüklemeden siteye girer, stok kontrolü yapar.
+    """
+    chrome_options = Options()
     
-    def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json', # JSON istiyoruz
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://www.zara.com/'
-        }
+    # --- HIZLANDIRMA AYARLARI ---
+    # 1. Tarayıcıyı gösterme (Arka planda çalışsın)
+    chrome_options.add_argument("--headless=new") 
     
-    def extract_product_id(self, url: str) -> Optional[str]:
-        """Linkten p123456 gibi olan ID'yi çeker"""
-        # Örnek link: .../gomlek-p0123456.html -> ID: 123456 (Baştaki 0 ve p harfi atılır)
-        match = re.search(r'p(\d+)\.html', url)
-        return match.group(1) if match else None
+    # 2. Resimleri yükleme (Büyük hız artışı sağlar)
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    # 3. Anti-Bot Ayarları (Siteye girebilmek için şart)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    chrome_options.add_argument("--start-maximized")
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    
+    result = {
+        'status': 'error',
+        'name': 'Zara Ürünü',
+        'price': '?',
+        'sizes': [],
+        'availability': 'out_of_stock'
+    }
 
-    async def get_product_data(self, url: str):
-        product_id = self.extract_product_id(url)
-        if not product_id:
-            logger.error("Ürün ID'si bulunamadı.")
-            return None
+    try:
+        logger.info(f"Siteye gidiliyor (Resimsiz): {url}")
+        driver.get(url)
+        wait = WebDriverWait(driver, 10)
 
-        # ZARA'NIN GİZLİ API ENDPOINT'İ
-        # Bu adres, ürün sayfasındaki tüm detayları JSON olarak verir.
-        api_url = f"https://www.zara.com/tr/tr/products-details?productIds={product_id}&ajax=true"
+        # 1. ADIM: İsim ve Fiyat (Hızlıca al, hata verirse geç)
+        try:
+            result['name'] = driver.find_element(By.TAG_NAME, "h1").text
+            result['price'] = driver.find_element(By.CSS_SELECTOR, ".price-current__amount, .money-amount").text
+        except:
+            pass
 
-        async with aiohttp.ClientSession(headers=self.headers) as session:
-            try:
-                async with session.get(api_url, timeout=10) as response:
-                    if response.status != 200:
-                        logger.error(f"API Hatası: {response.status}")
-                        return None
-                    
-                    data = await response.json()
-                    
-                    # Gelen veri bir liste içindedir, ilkini alalım
-                    if not data or len(data) == 0:
-                        return None
-                    
-                    product_json = data[0]
-                    
-                    # --- Verileri Ayıklama ---
-                    name = product_json.get('name', 'Zara Ürünü')
-                    price_val = product_json.get('price', {}).get('value', 0) / 100 # Fiyat kuruş cinsinden gelir
-                    price_fmt = f"{price_val} TL"
-                    
-                    # Bedenleri ve Stokları Bulma
-                    sizes_available = []
-                    
-                    # "colors" altında beden detayları olur
-                    for color in product_json.get('detail', {}).get('colors', []):
-                        for size in color.get('sizes', []):
-                            size_name = size.get('name')
-                            status = size.get('availability') # 'in_stock', 'out_of_stock', 'back_soon'
-                            
-                            if status == 'in_stock':
-                                sizes_available.append(size_name)
-                    
-                    availability = 'in_stock' if sizes_available else 'out_of_stock'
-                    
-                    return {
-                        'id': product_id,
-                        'url': url,
-                        'name': name,
-                        'price': price_fmt,
-                        'availability': availability,
-                        'sizes': sizes_available
-                    }
+        # 2. ADIM: TÜKENDİ Mİ? (Show Similar Products)
+        # Bu buton varsa ürün tamamen bitmiştir.
+        sold_out_btns = driver.find_elements(By.XPATH, "//button[@data-qa-action='show-similar-products']")
+        if sold_out_btns:
+            logger.info("Durum: TÜKENDİ (Buton görüldü)")
+            result['status'] = 'success'
+            result['availability'] = 'out_of_stock'
+            return result
 
-            except Exception as e:
-                logger.error(f"Bağlantı hatası: {e}")
-                return None
+        # 3. ADIM: EKLE BUTONUNA TIKLA
+        try:
+            # Ekle butonunu bul
+            add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
+            
+            # Tıkla (JavaScript ile tıklamak daha garantidir)
+            driver.execute_script("arguments[0].click();", add_btn)
+            
+            # 4. ADIM: BEDEN LİSTESİNİ BEKLE
+            # Bedenlerin olduğu kutu görünür olana kadar bekle
+            wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
+            
+            # Bedenleri topla
+            size_items = driver.find_elements(By.CSS_SELECTOR, "li.size-selector-list__item")
+            available_sizes = []
+            
+            for item in size_items:
+                try:
+                    # 'is-disabled' veya 'out-of-stock' class'ı YOKSA stoktadır.
+                    classes = item.get_attribute("class")
+                    if "is-disabled" not in classes and "out-of-stock" not in classes:
+                        text_elem = item.find_element(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']")
+                        available_sizes.append(text_elem.text)
+                except:
+                    continue
+
+            result['sizes'] = available_sizes
+            if available_sizes:
+                result['availability'] = 'in_stock'
+            
+            result['status'] = 'success'
+            logger.info(f"Stok bulundu: {available_sizes}")
+
+        except TimeoutException:
+            # Ekle butonu gelmediyse veya beden penceresi açılmadıysa
+            logger.warning("Zaman aşımı (Stok yok veya sayfa yüklenemedi)")
+            result['status'] = 'success' # Hata değil, sadece stok yok varsayıyoruz
+            
+    except Exception as e:
+        logger.error(f"Hata: {e}")
+    
+    finally:
+        driver.quit()
+        return result
 
 # ==========================================
-# TELEGRAM BOT KISMI (Değişmedi)
+# TELEGRAM KISMI
 # ==========================================
 
-# Yetki kontrolü decorator
-def check_auth(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
-            await update.message.reply_text("⛔ Yetkiniz yok.")
-            return
-        return await func(update, context)
-    return wrapper
-
-@check_auth
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 *Hızlı Zara Bot*\nLink gönder, saniyeler içinde takip başlasın.", parse_mode='Markdown')
+    await update.message.reply_text("👋 Zara Bot Hazır!\nLink atarak başla.")
 
-@check_auth
 async def add_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     if "zara.com" not in url:
-        await update.message.reply_text("❌ Geçersiz link.")
+        await update.message.reply_text("❌ Sadece Zara linki!")
         return
 
-    msg = await update.message.reply_text("⚡ API ile kontrol ediliyor...")
+    msg = await update.message.reply_text("⏳ Kontrol ediliyor (Resimler kapalı, hızlı mod)...")
     
-    checker = ZaraFastChecker()
-    info = await checker.get_product_data(url)
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, check_zara_stock_selenium, url)
     
-    if not info:
-        await msg.edit_text("❌ Ürün bilgisi çekilemedi. Linki kontrol edin.")
+    if data['status'] == 'error':
+        await msg.edit_text("❌ Bir hata oluştu.")
         return
 
     user_id = str(update.effective_user.id)
-    key = f"{user_id}_{info['id']}"
+    key = f"{user_id}_{datetime.now().timestamp()}"
     
     tracked_products[key] = {
-        **info,
-        'chat_id': update.effective_chat.id,
-        'user_id': user_id
+        'url': url,
+        'name': data['name'],
+        'price': data['price'],
+        'last_status': data['availability'],
+        'user_id': user_id,
+        'chat_id': update.effective_chat.id
     }
     
-    status_icon = "✅" if info['availability'] == 'in_stock' else "🔴"
-    sizes_str = ", ".join(info['sizes']) if info['sizes'] else "Yok"
+    icon = "✅" if data['availability'] == 'in_stock' else "❌"
+    sizes = ", ".join(data['sizes']) if data['sizes'] else "Tükendi"
     
     await msg.edit_text(
-        f"✅ *Takibe Alındı (Hızlı Mod)*\n"
-        f"📦 {info['name']}\n"
-        f"💰 {info['price']}\n"
-        f"{status_icon} Stok: {sizes_str}",
+        f"✅ *Eklendi*\n📦 {data['name']}\n💰 {data['price']}\n{icon} Durum: {sizes}",
         parse_mode='Markdown'
     )
 
-@check_auth
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     my_products = {k: v for k, v in tracked_products.items() if v['user_id'] == user_id}
     
     if not my_products:
-        await update.message.reply_text("📭 Listeniz boş.")
+        await update.message.reply_text("📭 Liste boş.")
         return
 
-    keyboard = []
     text = "📋 *Takip Listesi:*\n"
-    for key, p in my_products.items():
-        st = "✅" if p['availability'] == 'in_stock' else "🔴"
+    keyboard = []
+    for k, p in my_products.items():
+        st = "✅" if p['last_status'] == 'in_stock' else "❌"
         text += f"{st} {p['name']}\n"
-        keyboard.append([InlineKeyboardButton(f"🗑 Sil: {p['name'][:15]}", callback_data=f"del_{key}")])
-    
+        keyboard.append([InlineKeyboardButton(f"Sil: {p['name'][:10]}", callback_data=f"del_{k}")])
+        
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,51 +200,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = query.data.replace("del_", "")
         if key in tracked_products:
             del tracked_products[key]
-            await query.edit_message_text("🗑 Ürün silindi.")
+            await query.edit_message_text("🗑 Silindi.")
 
-# PERİYODİK KONTROL
-async def periodic_check(context: ContextTypes.DEFAULT_TYPE):
+async def periodic_check_job(context: ContextTypes.DEFAULT_TYPE):
     if not tracked_products: return
     
-    checker = ZaraFastChecker()
+    loop = asyncio.get_running_loop()
     
-    # Listeyi kopyala
     for key, product in list(tracked_products.items()):
         try:
-            # Çok hızlı olduğu için her ürün arasında sadece 1 saniye bekle
-            new_info = await checker.get_product_data(product['url'])
+            data = await loop.run_in_executor(None, check_zara_stock_selenium, product['url'])
             
-            if not new_info: continue
+            if data['status'] == 'error': continue
             
-            old_status = product['availability']
-            new_status = new_info['availability']
-            old_sizes = set(product['sizes'])
-            new_sizes = set(new_info['sizes'])
+            old_status = product['last_status']
+            new_status = data['availability']
             
-            # Bildirim Mantığı:
-            # 1. Stok yoktu -> Stok geldi
-            # 2. Stok vardı ama YENİ bir beden eklendi (Örn: Sadece S vardı, M de geldi)
-            if (old_status == 'out_of_stock' and new_status == 'in_stock') or \
-               (new_status == 'in_stock' and not new_sizes.issubset(old_sizes)):
-                
-                diff_sizes = list(new_sizes - old_sizes)
-                sizes_msg = ", ".join(new_info['sizes'])
-                
+            # Stok geldiyse bildirim at
+            if old_status == 'out_of_stock' and new_status == 'in_stock':
+                sizes = ", ".join(data['sizes'])
                 await context.bot.send_message(
                     chat_id=product['chat_id'],
-                    text=f"🚨 *STOK GELDİ!* 🚨\n\n📦 {new_info['name']}\n✅ Mevcut: {sizes_msg}\n🔗 [Satın Al]({product['url']})",
+                    text=f"🚨 *STOK GELDİ!* 🚨\n📦 {data['name']}\n✅ Bedenler: {sizes}\n🔗 [Link]({product['url']})",
                     parse_mode='Markdown'
                 )
             
-            # Bilgileri güncelle
-            tracked_products[key].update(new_info)
-            await asyncio.sleep(1) 
+            tracked_products[key]['last_status'] = new_status
             
         except Exception as e:
-            logger.error(f"Hata: {e}")
+            logger.error(f"Döngü hatası: {e}")
+        
+        await asyncio.sleep(5)
 
 if __name__ == '__main__':
-    if TELEGRAM_TOKEN == 'TOKEN_BURAYA':
+    if TELEGRAM_TOKEN == 'TOKEN_BURAYA_YAZ':
         print("Token girmeyi unutma!")
         exit()
 
@@ -237,7 +245,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(callback_handler))
     
     if app.job_queue:
-        app.job_queue.run_repeating(periodic_check, interval=CHECK_INTERVAL, first=5)
+        app.job_queue.run_repeating(periodic_check_job, interval=CHECK_INTERVAL, first=10)
     
-    print("🚀 Hızlı Bot Başlatıldı...")
+    print("Bot çalışıyor (Selenium - Resimsiz Mod)...")
     app.run_polling()
