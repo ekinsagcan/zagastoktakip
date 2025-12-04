@@ -1,23 +1,17 @@
-FROM python:3.11-slim
+# Microsoft'un hazır Playwright imajını kullanıyoruz (Python ve Tarayıcılar yüklü)
+FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
 
-# Çalışma dizini
 WORKDIR /app
 
-# Sistem bağımlılıklarını yükle
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python bağımlılıklarını kopyala ve yükle
+# Gerekli kütüphaneleri yükle
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bot kodunu kopyala
-COPY bot.py .
+# Playwright tarayıcılarını kur
+RUN playwright install chromium
+RUN playwright install-deps
 
-# Healthcheck ekle
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+COPY bot.py .
 
 # Botu başlat
 CMD ["python", "-u", "bot.py"]
