@@ -22,6 +22,8 @@ from selenium.common.exceptions import TimeoutException
 
 # --- AYARLAR ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# İzin verilen kullanıcılar (Virgülle ayrılmış ID'ler)
+ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')
 CHECK_INTERVAL = 300 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -31,10 +33,20 @@ logger = logging.getLogger(__name__)
 tracked_products: Dict[str, Dict] = {}
 pending_adds: Dict[str, str] = {} 
 
-# --- TARAYICI MOTORU (TURBO MOD) ---
+# --- YETKİ KONTROLÜ (KISKANÇ MOD) ---
+async def is_authorized(update: Update):
+    """Kullanıcı sevgilin mi kontrol eder, değilse kovalar."""
+    user_id = str(update.effective_user.id)
+    
+    # Eğer ALLOWED_USERS boşsa veya ID listede yoksa
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
+        await update.effective_message.reply_text("SEN BENİM SEVGİLİM DEĞİLSİN HEMEN BURADAN UZAKLAŞ 😡")
+        return False
+    return True
+
+# --- TARAYICI MOTORU (TURBO) ---
 def get_driver():
     chrome_options = Options()
-    # Eager modu: Sayfanın %100 bitmesini beklemez, iskelet yüklenince başlar (HIZLI)
     chrome_options.page_load_strategy = 'eager' 
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
@@ -44,20 +56,14 @@ def get_driver():
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # HIZ İÇİN: Tarayıcıda resimleri yüklemeyi engelliyoruz.
-    # (Merak etme, ürün fotosunu HTML kodundan çektiğimiz için sana yine foto gelecek!)
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
     
     return webdriver.Chrome(options=chrome_options)
 
 async def check_stock_selenium(url: str):
-    # --- 1. OTOMATİK LINK DÜZELTME ---
-    # Eğer linkte /tr/tr yoksa, biz ekleriz.
     if "zara.com" in url and "/tr/tr" not in url:
-        # Link yapısını bozmadan araya ekleyelim
         url = url.replace("zara.com/", "zara.com/tr/tr/")
-        logger.info(f"🇹🇷 Link Türkçe siteye çevrildi: {url}")
 
     result = {
         'status': 'error',
@@ -74,46 +80,36 @@ async def check_stock_selenium(url: str):
         driver = get_driver()
         try:
             driver.get(url)
-            # Bekleme süresini azalttık, dinamik bekleme kullanacağız
             wait = WebDriverWait(driver, 10) 
 
-            # 0. KONUM PENCERESİ (Hızlı Geçiş)
             try:
-                # Maksimum 3 saniye bekle, varsa kapat, yoksa devam et
                 geo_btn = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                 driver.execute_script("arguments[0].click();", geo_btn)
             except: pass
 
-            # 1. ÇEREZ (Varsa tek tıkla geç)
             try:
                 cookie = driver.find_element(By.ID, "onetrust-accept-btn-handler")
                 driver.execute_script("arguments[0].click();", cookie)
             except: pass
 
-            # 2. HIZLI VERİ ÇEKME
             try: result['name'] = driver.find_element(By.TAG_NAME, "h1").text
             except: pass
 
             try: result['price'] = driver.find_element(By.CSS_SELECTOR, ".price-current__amount, .money-amount").text
             except: pass
 
-            # RESİM (Meta Tag'den alıyoruz, sayfanın yüklenmesini beklemeye gerek yok)
             try:
                 meta_img = driver.find_element(By.XPATH, "//meta[@property='og:image']")
                 img = meta_img.get_attribute("content").split("?")[0]
                 result['image'] = img
             except: pass
 
-            # 3. STOK KONTROL (Akıllı Tarama)
             try:
                 add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                 driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
                 driver.execute_script("arguments[0].click();", add_btn)
                 
-                # Modal açılmasını bekle
                 wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
-                
-                # Ufak bir bekleme (Animasyon için) - Bunu 2 saniyeye indirdim
                 time.sleep(1.5) 
                 
                 labels = driver.find_elements(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']")
@@ -123,7 +119,6 @@ async def check_stock_selenium(url: str):
                     try:
                         txt = label.text.strip()
                         if not txt: continue
-                        # Disabled kontrolü
                         is_disabled = driver.execute_script("""
                             var el = arguments[0];
                             var parent = el.closest('li') || el.closest('button');
@@ -139,7 +134,6 @@ async def check_stock_selenium(url: str):
                 result['status'] = 'success'
                 
             except TimeoutException:
-                # Buton yoksa veya modal açılmadıysa stok yoktur
                 result['status'] = 'success'
         
         except Exception as e:
@@ -149,8 +143,6 @@ async def check_stock_selenium(url: str):
         return result
 
     return await loop.run_in_executor(None, sync_process)
-
-# --- UI FONKSİYONLARI ---
 
 def create_ui(data, url):
     if data['availability'] == 'in_stock':
@@ -180,46 +172,58 @@ async def set_commands(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
+# --- START KOMUTU ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Yetki Kontrolü
+    if not await is_authorized(update): return
+
     msg = (
         "👋 <b>Selam! Aşkım</b>\n\n"
         "Senin için zara ürünlerini takip edicem. Link gönder gerisine karışma. 😉"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
-# --- LİSTE (Şakalı) ---
+# --- LİSTELEME ---
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Listeye bakmaya üşendim şuan ya... 🥱")
+    # Yetki Kontrolü
+    if not await is_authorized(update): return
+
+    if update.callback_query:
+        await update.callback_query.answer()
+
+    await update.effective_message.reply_text("Listeye bakmaya üşendim şuan ya... 🥱")
     await asyncio.sleep(2)
     
     user_id = str(update.effective_user.id)
     my_products = {k: v for k, v in tracked_products.items() if v['user_id'] == user_id}
     
     if not my_products:
-        await update.message.reply_text("Şaka şaka... Ama cidden listen boş aşkım. Link at da çalışayım. 😘")
+        await update.effective_message.reply_text("Şaka şaka... Ama cidden listen boş aşkım. Link at da çalışayım. 😘")
         return
 
-    await update.message.reply_text("Şaka şaka aşkım 🥰 İşte takip listen:")
+    await update.effective_message.reply_text("Şaka şaka aşkım 🥰 İşte takip listen:")
 
     for k, v in my_products.items():
         icon = "🟢" if v['last_status'] == 'in_stock' else "🔴"
         text = f"{icon} <b>{v['name']}</b>\n🔗 <a href='{v['url']}'>Link</a>"
         keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             text, 
             parse_mode=ParseMode.HTML, 
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True
         )
 
-# --- ÜRÜN EKLEME (SORU KISMI) ---
+# --- ÜRÜN EKLEME ---
 async def add_product_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Yetki Kontrolü
+    if not await is_authorized(update): return
+
     url = update.message.text
     if "zara.com" not in url:
         await update.message.reply_text("❌ Sadece Zara linki at aşkım.", parse_mode=ParseMode.HTML)
         return
 
-    # Link düzeltme işlemini burada önizleme yapabiliriz ama asıl işlem Selenium'da
     user_id = update.effective_user.id
     pending_adds[user_id] = url
 
@@ -235,8 +239,11 @@ async def add_product_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode=ParseMode.HTML
     )
 
-# --- BUTON İŞLEMLERİ ---
+# --- BUTONLAR ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Yetki Kontrolü (Butona basanı da kontrol edelim)
+    if not await is_authorized(update): return
+
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -264,8 +271,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         key = f"{user_id}_{datetime.now().timestamp()}"
-        # Veritabanına kaydederken düzeltilmiş URL ile kaydetmek önemli değil, 
-        # çünkü bot check yaparken yine düzeltecek. Ama temiz olsun.
         if "zara.com" in url and "/tr/tr" not in url:
              url = url.replace("zara.com/", "zara.com/tr/tr/")
 
@@ -282,7 +287,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = create_ui(check_data, url)
         keyboard = [
             [InlineKeyboardButton("🔄 Yenile", callback_data=f"refresh_{key}"), InlineKeyboardButton("❌ Sil", callback_data=f"del_{key}")],
-            [InlineKeyboardButton("🔗 Zara'da Aç", url=url)]
+            [InlineKeyboardButton("🔗 Zara'da Aç", url=url)],
+            [InlineKeyboardButton("📋 Takip Listem", callback_data="show_list")]
         ]
         
         if check_data['image']:
@@ -302,6 +308,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Benimle bi daha konuşma. Takip falan etmiyorum ürünü.",
             parse_mode=ParseMode.HTML
         )
+
+    elif data == "show_list":
+        await list_products(update, context)
 
     elif data.startswith("del_"):
         key = data.replace("del_", "")
@@ -368,5 +377,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_callback))
     if app.job_queue:
         app.job_queue.run_repeating(check_job, interval=CHECK_INTERVAL, first=10)
-    print("Turbo Love Bot Başladı ❤️...")
+    print("Final Secure Bot Başladı 🔒...")
     app.run_polling()
