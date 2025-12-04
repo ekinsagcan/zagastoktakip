@@ -49,7 +49,7 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         'availability': 'out_of_stock',
         'sizes': [],
         'image': None, 
-        'price': ''
+        'price': 'Fiyat Bilgisi Yok'
     }
 
     try:
@@ -62,7 +62,7 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                 wait = WebDriverWait(inner_driver, 15)
                 time.sleep(2)
 
-                # --- 0. KONUM PENCERESİ (Önceki fix) ---
+                # --- 0. KONUM ---
                 try:
                     geo_btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                     time.sleep(3) 
@@ -76,7 +76,7 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                     inner_driver.execute_script("arguments[0].click();", cookie)
                 except: pass
 
-                # --- 2. VERİ ÇEKME (İsim, Fiyat, RESİM) ---
+                # --- 2. VERİ ÇEKME ---
                 try:
                     result['name'] = inner_driver.find_element(By.TAG_NAME, "h1").text
                 except: pass
@@ -86,26 +86,21 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                     result['price'] = price_el.text
                 except: pass
 
-                # --- RESİM ÇEKME (GÜNCELLENDİ: META TAG YÖNTEMİ) ---
+                # --- RESİM ---
                 try:
-                    # Yöntem 1: En garantisi (og:image)
                     meta_img = inner_driver.find_element(By.XPATH, "//meta[@property='og:image']")
                     img_url = meta_img.get_attribute("content")
-                    if img_url:
-                        # Zara bazen query parametreleri ekler, temizleyelim
-                        result['image'] = img_url.split("?")[0]
+                    if img_url: result['image'] = img_url.split("?")[0]
                 except:
                     try:
-                        # Yöntem 2: JSON-LD Schema (Yedek)
                         import json
                         script_tag = inner_driver.find_element(By.XPATH, "//script[@type='application/ld+json']")
                         data = json.loads(script_tag.get_attribute("innerHTML"))
                         if isinstance(data, list): data = data[0]
                         result['image'] = data.get('image', [None])[0]
-                    except:
-                        pass # Resim bulunamazsa metin olarak devam eder
+                    except: pass
 
-                # --- 3. EKLE BUTONU ---
+                # --- 3. STOK KONTROL ---
                 try:
                     add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                     inner_driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
@@ -156,12 +151,38 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         logger.error(f"Genel Hata: {e}")
         return result
 
-# --- TELEGRAM BOT KOMUTLARI ---
+# --- TELEGRAM ARAYÜZ FONKSİYONLARI ---
+
+def create_product_message(data, url):
+    """Şık bir ürün kartı oluşturur"""
+    
+    # Durum Simgesi ve Metni
+    if data['availability'] == 'in_stock':
+        status_line = "🟢 <b>STOKTA VAR</b>"
+        sizes_formatted = f"<code>{', '.join(data['sizes'])}</code>"
+    else:
+        status_line = "🔴 <b>TÜKENDİ</b>"
+        sizes_formatted = "<i>Stok bulunmuyor</i>"
+
+    # Zaman Damgası
+    check_time = datetime.now().strftime("%H:%M")
+
+    caption = (
+        f"💎 <b>{data['name']}</b>\n"
+        f"🔗 <a href='{url}'>Ürün Linki</a>\n\n"
+        f"💰 <b>{data['price']}</b>\n"
+        f"〰️〰️〰️〰️〰️〰️〰️\n"
+        f"📊 Durum: {status_line}\n"
+        f"📏 Bedenler: {sizes_formatted}\n"
+        f"〰️〰️〰️〰️〰️〰️〰️\n"
+        f"🕒 <i>Son Güncelleme: {check_time}</i>"
+    )
+    return caption
 
 async def set_commands(application: Application):
     commands = [
         BotCommand("start", "Botu başlat"),
-        BotCommand("add", "Yeni ürün ekle"),
+        BotCommand("add", "Ürün ekle"),
         BotCommand("list", "Listem"),
         BotCommand("help", "Yardım")
     ]
@@ -170,26 +191,30 @@ async def set_commands(application: Application):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.first_name
     msg = (
-        f"👋 *Merhaba {user}!*\n\n"
-        "🛍️ *Zara Stok Takip Botuna* hoş geldin.\n"
-        "Link gönder, takibe başlayayım."
+        f"✨ <b>Merhaba {user}!</b>\n\n"
+        "🛍️ <b>Zara Premium Stok Takipçisine</b> hoş geldin.\n\n"
+        "Sürekli kontrol etmekten yorulduğun ürünlerin linkini bana at, "
+        "arkana yaslan. Stok geldiğinde haberin olacak.\n\n"
+        "👇 <b>Başlamak için bir link yapıştır!</b>"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     if "zara.com" not in url:
-        await update.message.reply_text("❌ Geçersiz link.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❌ <b>Hata:</b> Lütfen geçerli bir Zara linki gönderin.", parse_mode=ParseMode.HTML)
         return
 
-    msg = await update.message.reply_text("🔎 *Ürün taranıyor...*", parse_mode=ParseMode.MARKDOWN)
+    # Şık bir bekleme mesajı
+    loading_msg = await update.message.reply_text("🔎 <i>Ürün analiz ediliyor, lütfen bekleyin...</i>", parse_mode=ParseMode.HTML)
     
     data = await check_stock_selenium(url, context, update.effective_chat.id)
     
     if data['status'] == 'error':
-        await msg.edit_text("⚠️ Hata oluştu.")
+        await loading_msg.edit_text("⚠️ <b>Hata:</b> Siteye şu an erişilemiyor. Lütfen sonra tekrar dene.", parse_mode=ParseMode.HTML)
         return
 
+    # Veritabanına kaydet
     key = f"{update.effective_user.id}_{datetime.now().timestamp()}"
     tracked_products[key] = {
         'url': url,
@@ -201,78 +226,110 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'user_id': str(update.effective_user.id)
     }
     
-    await msg.delete() 
+    await loading_msg.delete() 
 
-    status_text = "🟢 *STOKTA VAR*" if data['availability'] == 'in_stock' else "🔴 *TÜKENDİ*"
-    sizes_text = ", ".join(data['sizes']) if data['sizes'] else "Stok yok"
-    
-    caption = (
-        f"✅ *TAKİBE ALINDI*\n\n"
-        f"👗 *{data['name']}*\n"
-        f"🏷️ Fiyat: `{data['price']}`\n"
-        f"📊 Durum: {status_text}\n"
-        f"📏 Bedenler: `{sizes_text}`"
-    )
+    caption = create_product_message(data, url)
 
+    # Gelişmiş Klavye (Yenileme Butonu Eklendi)
     keyboard = [
-        [InlineKeyboardButton("🔗 Ürüne Git", url=url)],
-        [InlineKeyboardButton("🗑️ Takibi Bırak", callback_data=f"del_{key}")]
+        [InlineKeyboardButton("🔗 Siteye Git", url=url)],
+        [InlineKeyboardButton("🔄 Durumu Kontrol Et", callback_data=f"refresh_{key}")],
+        [InlineKeyboardButton("❌ Takibi Bırak", callback_data=f"del_{key}")]
     ]
     
-    # Resim varsa gönder, yoksa sadece mesaj
     if data['image']:
         try:
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=data['image'],
                 caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-        except Exception as e:
-            # Resim gönderme hatası olursa (bazen URL çok uzun olur) metin olarak at
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=caption,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+        except:
+             await context.bot.send_message(update.effective_chat.id, caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=caption,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await context.bot.send_message(update.effective_chat.id, caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     my_products = {k: v for k, v in tracked_products.items() if v['user_id'] == user_id}
     
     if not my_products:
-        await update.message.reply_text("📭 Listen boş.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("📭 <b>Listen bomboş.</b>\nHemen bir link gönder!", parse_mode=ParseMode.HTML)
         return
 
-    await update.message.reply_text(f"📋 *Listen ({len(my_products)} Ürün)*", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📋 <b>Takip Listen ({len(my_products)} Ürün)</b>", parse_mode=ParseMode.HTML)
 
     for k, v in my_products.items():
         icon = "🟢" if v['last_status'] == 'in_stock' else "🔴"
-        text = f"{icon} *{v['name']}*\n🔗 [Link]({v['url']})"
-        keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+        text = f"{icon} <b>{v['name']}</b>\n🔗 <a href='{v['url']}'>Ürün Linki</a>"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Kontrol Et", callback_data=f"refresh_{k}"), InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]
+        ]
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    if query.data.startswith("del_"):
-        key = query.data.replace("del_", "")
+    await query.answer() # Loading animasyonunu durdur
+    
+    data = query.data
+    
+    # SİLME İŞLEMİ
+    if data.startswith("del_"):
+        key = data.replace("del_", "")
         if key in tracked_products: 
             product_name = tracked_products[key]['name']
             del tracked_products[key]
-            await query.edit_message_text(f"🗑️ *{product_name}* silindi.", parse_mode=ParseMode.MARKDOWN)
+            await query.edit_message_caption(caption=f"🗑️ <b>{product_name}</b> takipten çıkarıldı.", parse_mode=ParseMode.HTML)
         else:
             await query.edit_message_text("❌ Ürün zaten silinmiş.")
 
+    # MANUEL YENİLEME İŞLEMİ (YENİ ÖZELLİK)
+    elif data.startswith("refresh_"):
+        key = data.replace("refresh_", "")
+        if key not in tracked_products:
+            await query.edit_message_text("❌ Ürün bulunamadı.")
+            return
+            
+        product = tracked_products[key]
+        await query.edit_message_reply_markup(reply_markup=None) # Butonları geçici gizle
+        await context.bot.send_chat_action(chat_id=product['chat_id'], action="typing") # "Yazıyor..." göster
+        
+        # Taramayı yap
+        check_data = await check_stock_selenium(product['url'])
+        
+        # Veritabanını güncelle
+        if check_data['status'] == 'success':
+            tracked_products[key]['last_status'] = check_data['availability']
+            
+            # Mesajı güncelle
+            new_caption = create_product_message(check_data, product['url'])
+            
+            keyboard = [
+                [InlineKeyboardButton("🔗 Siteye Git", url=product['url'])],
+                [InlineKeyboardButton("🔄 Durumu Kontrol Et", callback_data=f"refresh_{key}")],
+                [InlineKeyboardButton("❌ Takibi Bırak", callback_data=f"del_{key}")]
+            ]
+            
+            try:
+                await query.edit_message_caption(
+                    caption=new_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except:
+                # Bazen resim yoksa caption edit hata verebilir, text edit deneriz
+                await query.edit_message_text(
+                    text=new_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        else:
+            await query.answer("⚠️ Güncelleme başarısız, otomatik tekrar denenecek.", show_alert=True)
+
+# --- BİLDİRİM GÖNDERİMİ ---
 async def check_job(context: ContextTypes.DEFAULT_TYPE):
     if not tracked_products: return
     for key, product in list(tracked_products.items()):
@@ -280,24 +337,26 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
             data = await check_stock_selenium(product['url'])
             if data['status'] == 'error': continue
             
+            # STOK GELDİ Mİ?
             if product['last_status'] == 'out_of_stock' and data['availability'] == 'in_stock':
                 
                 caption = (
-                    f"🚨🚨 *STOK GELDİ! KOŞ!* 🚨🚨\n\n"
-                    f"👗 *{data['name']}*\n"
-                    f"📏 *Mevcut Bedenler:* `{', '.join(data['sizes'])}`\n"
-                    f"🏷️ Fiyat: `{product.get('price', '-')}`\n\n"
-                    f"👇 *HEMEN AL BUTONUNA BAS!*"
+                    f"🚨 <b>STOK ALARMI! KOŞ!</b> 🚨\n\n"
+                    f"💎 <b>{data['name']}</b>\n"
+                    f"📏 Bedenler: <code>{', '.join(data['sizes'])}</code>\n"
+                    f"💰 {product.get('price', '-')}\n\n"
+                    f"👇 <b>HEMEN AL BUTONUNA BAS!</b>"
                 )
-                keyboard = [[InlineKeyboardButton("🛒 SATIN AL", url=product['url'])]]
+                
+                keyboard = [[InlineKeyboardButton("🛒 SATIN AL (ZARA)", url=product['url'])]]
                 
                 if product.get('image'):
                     try:
-                        await context.bot.send_photo(product['chat_id'], photo=product['image'], caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+                        await context.bot.send_photo(product['chat_id'], photo=product['image'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
                     except:
-                         await context.bot.send_message(product['chat_id'], text=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+                         await context.bot.send_message(product['chat_id'], text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
                 else:
-                    await context.bot.send_message(product['chat_id'], text=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+                    await context.bot.send_message(product['chat_id'], text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
             
             tracked_products[key]['last_status'] = data['availability']
             await asyncio.sleep(5)
@@ -315,5 +374,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_callback))
     if app.job_queue:
         app.job_queue.run_repeating(check_job, interval=CHECK_INTERVAL, first=10)
-    print("Bot Başladı (Resim Fix)...")
+    print("Bot Başladı (V5 - Premium UI)...")
     app.run_polling()
