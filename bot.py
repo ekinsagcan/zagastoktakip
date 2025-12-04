@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Veritabanı
 tracked_products: Dict[str, Dict] = {}
-pending_adds: Dict[str, str] = {} # Linki tutar
-waiting_for_sizes: Dict[str, str] = {} # Beden cevabı bekleyen kullanıcıları tutar (User ID -> URL)
+pending_adds: Dict[str, str] = {} 
+waiting_for_sizes: Dict[str, str] = {} 
 
 # --- YETKİ KONTROLÜ ---
 async def is_authorized(update: Update):
@@ -66,7 +66,7 @@ async def check_stock_selenium(url: str):
         'status': 'error',
         'name': 'Zara Ürünü',
         'availability': 'out_of_stock',
-        'sizes': [], # Sitedeki MEVCUT bedenler
+        'sizes': [], 
         'image': None, 
         'price': 'Fiyat Yok'
     }
@@ -104,7 +104,7 @@ async def check_stock_selenium(url: str):
                 result['image'] = img
             except: pass
 
-            # 3. STOK KONTROL
+            # 3. STOK KONTROL (GÜNCELLENDİ)
             try:
                 add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                 driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
@@ -113,13 +113,32 @@ async def check_stock_selenium(url: str):
                 wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
                 time.sleep(1.5) 
                 
+                # Beden etiketlerini bul
                 labels = driver.find_elements(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']")
                 available_sizes = []
                 
                 for label in labels:
                     try:
-                        txt = label.text.strip()
-                        if not txt: continue
+                        # 1. Beden ismini al (Örn: M)
+                        size_name = label.text.strip()
+                        if not size_name: continue
+
+                        # 2. Üst elemente (parent) çıkıp TÜM yazıyı oku
+                        # Bu sayede "M - Benzer Ürünler" veya "M - Çok Yakında" yazısını yakalarız
+                        full_text = driver.execute_script("""
+                            var el = arguments[0];
+                            var parent = el.closest('li') || el.closest('button');
+                            return parent ? parent.innerText : '';
+                        """, label).upper() # Kontrol kolay olsun diye büyük harfe çevir
+                        
+                        # 3. YASAKLI KELİME FİLTRESİ
+                        # Eğer bu kelimeler varsa, buton aktif olsa bile STOK YOKTUR.
+                        forbidden_words = ["BENZER", "SIMILAR", "YAKINDA", "SOON", "TÜKENDİ", "OUT OF STOCK"]
+                        
+                        if any(word in full_text for word in forbidden_words):
+                            continue # Bu bedeni atla, stok yok say
+
+                        # 4. Standart Disabled Kontrolü
                         is_disabled = driver.execute_script("""
                             var el = arguments[0];
                             var parent = el.closest('li') || el.closest('button');
@@ -127,7 +146,10 @@ async def check_stock_selenium(url: str):
                             var classes = parent.className;
                             return classes.includes('is-disabled') || classes.includes('out-of-stock') || parent.hasAttribute('disabled');
                         """, label)
-                        if not is_disabled: available_sizes.append(txt)
+                        
+                        if not is_disabled: 
+                            available_sizes.append(size_name)
+
                     except: continue
                 
                 result['sizes'] = available_sizes
@@ -148,12 +170,10 @@ async def check_stock_selenium(url: str):
 # --- UI FONKSİYONLARI ---
 
 def create_ui(data, url, target_sizes):
-    # Kullanıcının hedeflediği bedenler ile sitedeki bedenlerin kesişimi
     available_targets = []
     if 'HEPSI' in target_sizes:
         available_targets = data['sizes']
     else:
-        # Büyük/Küçük harf duyarlılığını kaldırarak kontrol
         available_targets = [s for s in data['sizes'] if s.upper() in target_sizes]
 
     if available_targets:
@@ -163,9 +183,7 @@ def create_ui(data, url, target_sizes):
         status_line = "🔴 <b>ARADIĞIN BEDEN YOK</b>"
         sizes_formatted = "<i>Beklemedeyiz...</i>"
 
-    # Takip edilen bedenleri göster
     tracked_str = "Tümü" if 'HEPSI' in target_sizes else ", ".join(target_sizes)
-
     separator = "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
     
     caption = (
@@ -210,13 +228,10 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Şaka şaka aşkım 🥰 İşte takip listen:")
 
     for k, v in my_products.items():
-        # Hedef bedenlerden herhangi biri stokta mı?
         is_happy = False
         if 'HEPSI' in v['target_sizes']:
             is_happy = (v['last_status'] == 'in_stock')
         else:
-            # Son taramada bulunan bedenler (v'nin içinde tutmuyoruz ama last_status genel stok durumu)
-            # Burada ikon genel durumu göstersin
             is_happy = (v['last_status'] == 'in_stock_target')
 
         icon = "🟢" if is_happy else "🔴"
@@ -230,14 +245,11 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_product_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
 
-    # Eğer kullanıcı zaten beden yazma aşamasındaysa ve yeni link attıysa, eskisini silip yeniye geçelim
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Link mi kontrol et
     if "zara.com" in text:
         pending_adds[user_id] = text
-        # Varsa eski bekleyen beden sorgusunu sil
         if user_id in waiting_for_sizes: del waiting_for_sizes[user_id]
 
         keyboard = [
@@ -251,25 +263,22 @@ async def add_product_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Eğer link değilse ve kullanıcı beden girmesi gerekiyorsa (Adım 3)
     if user_id in waiting_for_sizes:
         await process_size_input(update, context)
         return
 
-    # Hiçbiri değilse
     await update.message.reply_text("❌ Aşkım ya Zara linki at ya da sorduğumda beden yaz, kafamı karıştırma.", parse_mode=ParseMode.HTML)
 
-# --- ADIM 3: BEDEN GİRİŞİ VE KAYIT ---
+# --- ADIM 3: BEDEN GİRİŞİ ---
 async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    raw_text = update.message.text.upper().strip() # HEPSI, S, M, XL
+    raw_text = update.message.text.upper().strip() 
     url = waiting_for_sizes[user_id]
 
     target_sizes = []
     if "HEPSI" in raw_text or "TÜMÜ" in raw_text or "HERŞEY" in raw_text:
         target_sizes = ['HEPSI']
     else:
-        # Virgül veya boşlukla ayır
         parts = raw_text.replace(" ", ",").split(",")
         target_sizes = [p.strip() for p in parts if p.strip()]
     
@@ -277,7 +286,6 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Hiç beden anlamadım. Tekrar yazar mısın? (Örn: S, M)")
         return
 
-    # Listeden çıkar, işleme başla
     del waiting_for_sizes[user_id]
 
     await update.message.reply_text(f"Tamamdır! <b>{', '.join(target_sizes)}</b> bedenleri için bakıyorum... 🕵️‍♀️", parse_mode=ParseMode.HTML)
@@ -289,19 +297,12 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Siteye giremedim aşkım ya, sonra tekrar deneriz.")
         return
 
-    # İlk Kontrol: İstediği beden var mı?
     initial_status = 'out_of_stock'
-    available_targets = []
-    
     if 'HEPSI' in target_sizes:
-        if check_data['availability'] == 'in_stock':
-            initial_status = 'in_stock_target' # Hedef tuttu
-            available_targets = check_data['sizes']
+        if check_data['availability'] == 'in_stock': initial_status = 'in_stock_target'
     else:
-        # Sitedeki bedenlerle hedefleri karşılaştır
         available_targets = [s for s in check_data['sizes'] if s.upper() in target_sizes]
-        if available_targets:
-            initial_status = 'in_stock_target'
+        if available_targets: initial_status = 'in_stock_target'
 
     key = f"{user_id}_{datetime.now().timestamp()}"
     tracked_products[key] = {
@@ -309,8 +310,8 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'name': check_data['name'],
         'price': check_data['price'],
         'image': check_data['image'],
-        'last_status': initial_status, # out_of_stock veya in_stock_target
-        'target_sizes': target_sizes, # ['S', 'M'] veya ['HEPSI']
+        'last_status': initial_status, 
+        'target_sizes': target_sizes,
         'chat_id': update.effective_chat.id,
         'user_id': str(user_id)
     }
@@ -341,7 +342,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         url = pending_adds.pop(user_id)
-        # Şimdi beden sorma aşamasına geçiyoruz
         waiting_for_sizes[user_id] = url
         
         await query.edit_message_text(
@@ -375,7 +375,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             check_data = await check_stock_selenium(product['url'])
             
             if check_data['status'] == 'success':
-                # Durumu hesapla
                 current_status = 'out_of_stock'
                 if 'HEPSI' in product['target_sizes']:
                     if check_data['availability'] == 'in_stock': current_status = 'in_stock_target'
@@ -401,7 +400,6 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
             data = await check_stock_selenium(product['url'])
             if data['status'] == 'error': continue
             
-            # Stok Durumunu Analiz Et
             is_target_found = False
             found_sizes = []
             
@@ -410,14 +408,11 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
                     is_target_found = True
                     found_sizes = data['sizes']
             else:
-                # Kesişim var mı?
                 found_sizes = [s for s in data['sizes'] if s.upper() in product['target_sizes']]
-                if found_sizes:
-                    is_target_found = True
+                if found_sizes: is_target_found = True
             
             current_status = 'in_stock_target' if is_target_found else 'out_of_stock'
 
-            # EĞER: Önceden hedeflediğim beden yoktu (out_of_stock) VE Şimdi var (in_stock_target)
             if product['last_status'] == 'out_of_stock' and current_status == 'in_stock_target':
                 caption = (
                     f"🚨🚨 <b>AŞKIM KOŞ STOK GELDİ!</b> 🚨🚨\n\n"
@@ -445,7 +440,6 @@ if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_products))
-    # Önce beden girişi yakalansın diye normal mesaj handler'ı, link kontrolü içinde yapılıyor
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), add_product_request))
     app.add_handler(CallbackQueryHandler(button_callback))
     if app.job_queue:
