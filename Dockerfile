@@ -28,7 +28,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 7. Kodları kopyala
-COPY main.py .
+COPY bot.py .
 
 # 8. Botu başlat
-CMD ["python", "main.py"]
+CMD ["python", "bot.py"]
