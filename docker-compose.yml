@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  zara-bot:
+    build: .
+    container_name: zara-stock-bot
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ALLOWED_USERS=${ALLOWED_USERS}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-300}
+    volumes:
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
