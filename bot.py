@@ -52,6 +52,10 @@ def check_zara_stock_selenium(url: str):
     # 2. Resimleri yükleme (Büyük hız artışı sağlar)
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
+
+    chrome_options.add_argument("--headless=new") # Penceresiz mod (Şart)
+    chrome_options.add_argument("--no-sandbox") # Docker için KRİTİK (Olmazsa çalışmaz)
+    chrome_options.add_argument("--disable-dev-shm-usage") # Docker hafıza sorunu için KRİTİK
     
     # 3. Anti-Bot Ayarları (Siteye girebilmek için şart)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
