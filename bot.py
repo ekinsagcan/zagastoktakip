@@ -3,6 +3,7 @@ import logging
 import asyncio
 import json
 import re
+from curl_cffi.requests import AsyncSession
 from datetime import datetime
 from typing import Dict, List, Optional
 import aiohttp
@@ -66,15 +67,15 @@ class ZaraStockChecker:
             if not product_id:
                 return None
             
-            async with aiohttp.ClientSession() as session:
-                # Önce HTML sayfasını çek
-                async with session.get(url, headers=self.headers) as response:
-                    # Hata ayıklama için status kodu yazdıralım
-                    if response.status != 200:
-                        logger.error(f"Zara erişim hatası! Status Code: {response.status}")
-                        return None
+            async with AsyncSession(impersonate="chrome110") as session:
+                response = await session.get(url, headers=self.headers)
+
+                if response.status_code != 200:
+                    logger.error(f"Erişim Hatası: {response.status_code}")
+                    return None
+                
                     
-                    html = await response.text()
+                    html = response.text
                     soup = BeautifulSoup(html, 'html.parser')
                     
                     # Sayfadaki JSON verilerini bul
