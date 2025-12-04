@@ -3,6 +3,7 @@ import logging
 import asyncio
 import json
 import re
+from playwright.async_api import async_playwright
 from curl_cffi.requests import AsyncSession
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -39,20 +40,6 @@ class ZaraStockChecker:
     
     def __init__(self):
         self.base_url = "https://www.zara.com"
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.google.com/',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-}
         
     
     def extract_product_id(self, url: str) -> Optional[str]:
@@ -62,84 +49,102 @@ class ZaraStockChecker:
     
     async def get_product_info(self, url: str) -> Optional[Dict]:
         """Ürün bilgilerini ve stok durumunu getirir"""
-        try:
-            product_id = self.extract_product_id(url)
-            if not product_id:
-                return None
+        product_id = self.extract_product_id(url)
+        if not product_id:
+            return None
             
-            async with AsyncSession(impersonate="chrome110") as session:
-                response = await session.get(url, headers=self.headers)
-
-                if response.status_code != 200:
-                    logger.error(f"Erişim Hatası: {response.status_code}")
-                    return None
+         async with async_playwright() as p:
+            try:
+                # Gerçek bir Chrome tarayıcısı gibi davran
+                browser = await p.chromium.launch(headless=True) # Hata alırsanız headless=False yapıp test edebilirsiniz
+                context = await browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                )
+                page = await context.new_page()
                 
+                # Sayfaya git
+                # Timeout süresini 60 saniye yapalım, bazen yavaş açılır
+                await page.goto(url, timeout=60000, wait_until='domcontentloaded')
+                
+                # Zara'nın yüklenmesini bekle (Önemli nokta burası)
+                # Ürün isminin veya fiyatın görünmesini bekliyoruz
+                try:
+                    await page.wait_for_selector('h1.product-detail-info__header-name', timeout=15000)
+                except:
+                    logger.warning("Sayfa tam yüklenemedi veya seçici bulunamadı.")
+
+                # Sayfanın son halinin HTML'ini al
+                html = await page.content()
+                await browser.close()
+
+                # Buradan sonrası sizin eski BeautifulSoup kodunuzla aynı
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # --- SİZİN MEVCUT AYRIŞTIRMA KODLARINIZ ---
+                # JSON verilerini bul
+                script_tags = soup.find_all('script', type='application/ld+json')
+                product_data = None
+                
+                for script in script_tags:
+                    try:
+                        data = json.loads(script.string)
+                        if data.get('@type') == 'Product':
+                            product_data = data
+                            break
+                    except:
+                        continue
+                
+                name = soup.find('h1', class_='product-detail-info__header-name')
+                price = soup.find('span', class_='price-current__amount')
+                
+                # Eğer HTML'den fiyat bulunamazsa JSON'dan almaya çalış
+                price_text = 'Fiyat bulunamadı'
+                if price:
+                    price_text = price.get_text(strip=True)
+                elif product_data and 'offers' in product_data:
+                    price_val = product_data['offers'].get('price')
+                    currency = product_data['offers'].get('priceCurrency', '')
+                    if price_val:
+                        price_text = f"{price_val} {currency}"
+
+                # Stok durumunu kontrol et
+                availability = 'unknown'
+                sizes_available = []
+                
+                # Beden seçeneklerini bul
+                size_elements = soup.find_all('li', class_='product-detail-size-selector__size-list-item')
+                for size in size_elements:
+                    size_text = size.get_text(strip=True)
+                    # Zara bazen 'is-disabled' yerine farklı classlar kullanabilir, veri özelliğine de bakalım
+                    classes = size.get('class', [])
+                    is_available = 'is-disabled' not in classes and 'product-detail-size-selector__size-list-item--out-of-stock' not in classes
                     
-                    html = response.text
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    # Sayfadaki JSON verilerini bul
-                    script_tags = soup.find_all('script', type='application/ld+json')
-                    product_data = None
-                    
-                    for script in script_tags:
-                        try:
-                            data = json.loads(script.string)
-                            if data.get('@type') == 'Product':
-                                product_data = data
-                                break
-                        except:
-                            continue
-                    
-                    if not product_data:
-                        # Alternatif: window.zara.dataLayer'dan veri çek
-                        match = re.search(r'window\.zara\.dataLayer\s*=\s*(\{.*?\});', html, re.DOTALL)
-                        if match:
-                            try:
-                                data_layer = json.loads(match.group(1))
-                                product_data = data_layer.get('product', {})
-                            except:
-                                pass
-                    
-                    # Ürün bilgilerini hazırla
-                    name = soup.find('h1', class_='product-detail-info__header-name')
-                    price = soup.find('span', class_='price-current__amount')
-                    
-                    # Stok durumunu kontrol et
-                    availability = 'unknown'
-                    sizes_available = []
-                    
-                    # Beden seçeneklerini bul
-                    size_elements = soup.find_all('li', class_='product-detail-size-selector__size-list-item')
-                    for size in size_elements:
-                        size_text = size.get_text(strip=True)
-                        is_available = 'is-disabled' not in size.get('class', [])
-                        if is_available:
-                            sizes_available.append(size_text)
-                    
-                    if sizes_available:
+                    if is_available:
+                        sizes_available.append(size_text)
+                
+                if sizes_available:
+                    availability = 'in_stock'
+                else:
+                    # Alternatif stok kontrolü (Sepete ekle butonu)
+                    add_to_cart = soup.find('button', class_='button-primary') # Class ismi değişmiş olabilir
+                    if add_to_cart and not add_to_cart.get('disabled'):
                         availability = 'in_stock'
                     else:
-                        # "Sepete Ekle" butonu var mı kontrol et
-                        add_to_cart = soup.find('button', class_='button-primary')
-                        if add_to_cart and not add_to_cart.get('disabled'):
-                            availability = 'in_stock'
-                        else:
-                            availability = 'out_of_stock'
-                    
-                    return {
-                        'id': product_id,
-                        'url': url,
-                        'name': name.get_text(strip=True) if name else 'Bilinmeyen Ürün',
-                        'price': price.get_text(strip=True) if price else 'Fiyat bulunamadı',
-                        'availability': availability,
-                        'sizes': sizes_available,
-                        'last_check': datetime.now().isoformat()
-                    }
-        
-        except Exception as e:
-            logger.error(f"Ürün bilgisi alınırken hata: {e}")
-            return None
+                        availability = 'out_of_stock'
+                
+                return {
+                    'id': product_id,
+                    'url': url,
+                    'name': name.get_text(strip=True) if name else 'Bilinmeyen Ürün',
+                    'price': price_text,
+                    'availability': availability,
+                    'sizes': sizes_available,
+                    'last_check': datetime.now().isoformat()
+                }
+
+            except Exception as e:
+                logger.error(f"Playwright hatası: {e}")
+                return None
 
 
 # Yetki kontrolü
