@@ -3,8 +3,6 @@ import logging
 import asyncio
 import json
 import re
-from playwright.async_api import async_playwright
-from curl_cffi.requests import AsyncSession
 from datetime import datetime
 from typing import Dict, List, Optional
 import aiohttp
@@ -18,6 +16,8 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+# Playwright importu
+from playwright.async_api import async_playwright
 
 # Logging ayarları
 logging.basicConfig(
@@ -36,11 +36,10 @@ tracked_products: Dict[str, Dict] = {}
 
 
 class ZaraStockChecker:
-    """Zara ürün stok kontrolü için sınıf"""
+    """Zara ürün stok kontrolü için sınıf (Playwright tabanlı)"""
     
     def __init__(self):
         self.base_url = "https://www.zara.com"
-        
     
     def extract_product_id(self, url: str) -> Optional[str]:
         """URL'den ürün ID'sini çıkarır"""
@@ -48,26 +47,25 @@ class ZaraStockChecker:
         return match.group(1) if match else None
     
     async def get_product_info(self, url: str) -> Optional[Dict]:
-        """Ürün bilgilerini ve stok durumunu getirir"""
+        """Ürün bilgilerini ve stok durumunu Playwright ile getirir"""
         product_id = self.extract_product_id(url)
         if not product_id:
             return None
-            
-         async with async_playwright() as p:
+
+        # Playwright tarayıcısını başlat
+        async with async_playwright() as p:
             try:
                 # Gerçek bir Chrome tarayıcısı gibi davran
-                browser = await p.chromium.launch(headless=True) # Hata alırsanız headless=False yapıp test edebilirsiniz
+                browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 )
                 page = await context.new_page()
                 
-                # Sayfaya git
-                # Timeout süresini 60 saniye yapalım, bazen yavaş açılır
+                # Sayfaya git (Timeout 60sn)
                 await page.goto(url, timeout=60000, wait_until='domcontentloaded')
                 
-                # Zara'nın yüklenmesini bekle (Önemli nokta burası)
-                # Ürün isminin veya fiyatın görünmesini bekliyoruz
+                # Zara'nın yüklenmesini bekle
                 try:
                     await page.wait_for_selector('h1.product-detail-info__header-name', timeout=15000)
                 except:
@@ -77,10 +75,9 @@ class ZaraStockChecker:
                 html = await page.content()
                 await browser.close()
 
-                # Buradan sonrası sizin eski BeautifulSoup kodunuzla aynı
+                # HTML Ayrıştırma
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # --- SİZİN MEVCUT AYRIŞTIRMA KODLARINIZ ---
                 # JSON verilerini bul
                 script_tags = soup.find_all('script', type='application/ld+json')
                 product_data = None
@@ -115,8 +112,8 @@ class ZaraStockChecker:
                 size_elements = soup.find_all('li', class_='product-detail-size-selector__size-list-item')
                 for size in size_elements:
                     size_text = size.get_text(strip=True)
-                    # Zara bazen 'is-disabled' yerine farklı classlar kullanabilir, veri özelliğine de bakalım
                     classes = size.get('class', [])
+                    # Stokta olmayanlar genelde disabled veya out-of-stock class'ı alır
                     is_available = 'is-disabled' not in classes and 'product-detail-size-selector__size-list-item--out-of-stock' not in classes
                     
                     if is_available:
@@ -126,7 +123,7 @@ class ZaraStockChecker:
                     availability = 'in_stock'
                 else:
                     # Alternatif stok kontrolü (Sepete ekle butonu)
-                    add_to_cart = soup.find('button', class_='button-primary') # Class ismi değişmiş olabilir
+                    add_to_cart = soup.find('button', class_='button-primary')
                     if add_to_cart and not add_to_cart.get('disabled'):
                         availability = 'in_stock'
                     else:
@@ -224,14 +221,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Yükleniyor mesajı
-    status_msg = await update.message.reply_text("🔍 Ürün bilgileri alınıyor...")
+    status_msg = await update.message.reply_text("🔍 Ürün bilgileri alınıyor (biraz sürebilir)...")
     
     checker = ZaraStockChecker()
     product_info = await checker.get_product_info(url)
     
     if not product_info:
         await status_msg.edit_text(
-            "❌ Ürün bilgileri alınamadı. Lütfen linki kontrol edin."
+            "❌ Ürün bilgileri alınamadı. Zara bot korumasına takılmış olabilir veya link geçersiz."
         )
         return
     
@@ -388,6 +385,8 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_info:
             tracked_products[key].update(new_info)
             results.append((product['name'], new_info['availability']))
+        # Hızlı istek atınca ban yememek için bekle
+        await asyncio.sleep(2)
     
     response = "📊 *Stok Kontrol Sonuçları:*\n\n"
     for name, availability in results:
@@ -445,7 +444,7 @@ async def periodic_check(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ürün kontrolünde hata ({key}): {e}")
         
         # Rate limiting için bekleme
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
