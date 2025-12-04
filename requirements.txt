@@ -3,4 +3,4 @@ aiohttp==3.9.1
 beautifulsoup4==4.12.2
 lxml==5.1.0
 APScheduler==3.10.4
-curl_cffi==0.5.10
+playwright==1.41.0
