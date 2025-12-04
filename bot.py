@@ -61,21 +61,22 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
             try:
                 logger.info(f"🔍 Kontrol ediliyor: {url}")
                 inner_driver.get(url)
-                wait = WebDriverWait(inner_driver, 10)
+                wait = WebDriverWait(inner_driver, 10) # 10 saniye bekleme hakkı
                 
-                # Sayfa otursun
-                time.sleep(3) 
+                # Sayfa ilk yükleniş
+                time.sleep(2) 
 
-                # --- 0. ADIM: ÜLKE SEÇİMİ (KRİTİK DÜZELTME) ---
+                # --- 0. ADIM: KONUM PENCERESİNİ KAPAT (Senin verdiğin kod) ---
                 try:
-                    # Ekranda içinde "Türkiye" geçen herhangi bir butona tıkla
-                    # Zara genelde: "Evet, Türkiye sitesinden devam et" der.
-                    geo_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Türkiye')]")))
+                    # CSS Selector ile data-qa-action'ı hedefliyoruz. Nokta atışıdır.
+                    geo_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                     geo_btn.click()
-                    logger.info("🌍 Ülke seçimi (Türkiye) yapıldı.")
-                    time.sleep(1) # Pencerenin kapanması için bekle
+                    logger.info("🌍 'Türkiye Sitesinde Kal' butonuna tıklandı.")
+                    
+                    # Tıkladıktan sonra sayfa yenilenebilir, 2 saniye bekle
+                    time.sleep(2)
                 except:
-                    logger.info("🌍 Ülke penceresi çıkmadı, devam ediliyor.")
+                    logger.info("🌍 Konum penceresi çıkmadı (veya zaten kapalı), devam ediliyor.")
 
                 # --- 1. ADIM: ÇEREZLERİ KAPAT ---
                 try:
@@ -94,11 +95,11 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                     # Butonu bul
                     add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                     
-                    # Butonu ekrana getir (Scroll)
+                    # Scroll yap (Butonu görünür kıl)
                     inner_driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
                     time.sleep(1)
                     
-                    # JavaScript ile tıkla (Önünde engel olsa bile tıklar)
+                    # JS ile tıkla
                     inner_driver.execute_script("arguments[0].click();", add_btn)
                     
                     # Modal bekle
@@ -121,14 +122,14 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                     result['status'] = 'success'
                     
                 except TimeoutException:
-                    logger.warning("⚠️ Ekle butonu bulunamadı veya modal açılmadı.")
+                    logger.warning("⚠️ Ekle butonu bulunamadı veya pencere açılmadı.")
                     result['status'] = 'success' 
             
             except Exception as e:
                 logger.error(f"İç Hata: {e}")
             
             finally:
-                # HER DURUMDA FOTOĞRAF ÇEK (SORUNU GÖRMEK İÇİN)
+                # EĞER STOK YOK DERSE FOTOĞRAF ÇEK (Hala sorun varsa görelim)
                 if chat_id:
                     screenshot_name = f"debug_{datetime.now().timestamp()}.png"
                     inner_driver.save_screenshot(screenshot_name)
@@ -143,7 +144,7 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         # Fotoğraf Gönderimi
         if final_data['screenshot'] and os.path.exists(final_data['screenshot']) and context and chat_id:
             caption_text = "📸 Botun gördüğü ekran.\n"
-            caption_text += "Durum: STOK VAR" if final_data['availability'] == 'in_stock' else "Durum: TÜKENDİ (Görünmüyor)"
+            caption_text += "Durum: STOK VAR" if final_data['availability'] == 'in_stock' else "Durum: TÜKENDİ"
             
             await context.bot.send_photo(
                 chat_id=chat_id, 
@@ -169,12 +170,12 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sadece Zara linki.")
         return
 
-    msg = await update.message.reply_text("📸 Siteye giriliyor...")
+    msg = await update.message.reply_text("📸 Kontrol ediliyor...")
     
     data = await check_stock_selenium(url, context, update.effective_chat.id)
     
     if data['status'] == 'error':
-        await msg.edit_text("❌ Kritik hata.")
+        await msg.edit_text("❌ Hata.")
         return
 
     key = f"{update.effective_user.id}_{datetime.now().timestamp()}"
@@ -216,7 +217,6 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
     if not tracked_products: return
     for key, product in list(tracked_products.items()):
         try:
-            # Otomatik kontrolde fotoğraf atmıyoruz, sadece manuelde atıyoruz
             data = await check_stock_selenium(product['url'])
             if data['status'] == 'error': continue
             
