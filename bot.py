@@ -16,7 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+from selenium.common.exceptions import TimeoutException
 
 # --- AYARLAR ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -34,7 +34,7 @@ def get_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080") # Çözünürlük önemli
+    chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
@@ -48,7 +48,8 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         'status': 'error',
         'name': 'Zara Ürünü',
         'availability': 'out_of_stock',
-        'sizes': []
+        'sizes': [],
+        'screenshot': None # Screenshot yolu
     }
 
     try:
@@ -57,103 +58,101 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         def sync_process():
             inner_driver = get_driver()
             try:
-                logger.info(f"🔍 Kontrol: {url}")
+                logger.info(f"🔍 Kontrol ediliyor: {url}")
                 inner_driver.get(url)
-                wait = WebDriverWait(inner_driver, 15) # Süreyi biraz artırdık
+                wait = WebDriverWait(inner_driver, 10)
 
-                # 1. ADIM: ÇEREZLERİ KAPAT (EN ÖNEMLİ KISIM)
+                # Sayfanın yüklenmesi için kesin bekleme
+                import time
+                time.sleep(3) 
+
+                # 1. Çerezleri Kapatmayı Dene
                 try:
-                    # Zara genelde 'Onetrust' kullanır
-                    cookie_btn = wait.until(EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler")))
-                    cookie_btn.click()
-                    logger.info("🍪 Çerez penceresi kapatıldı.")
-                except:
-                    logger.info("🍪 Çerez penceresi bulunamadı veya zaten kapalı.")
+                    cookie = inner_driver.find_element(By.ID, "onetrust-accept-btn-handler")
+                    cookie.click()
+                except: pass
 
-                # Ürün Adı
+                # İsim Al
                 try:
                     result['name'] = inner_driver.find_element(By.TAG_NAME, "h1").text
                 except: pass
 
-                # 2. ADIM: TÜKENDİ Mİ?
-                if len(inner_driver.find_elements(By.XPATH, "//button[@data-qa-action='show-similar-products']")) > 0:
-                    result['status'] = 'success'
-                    return result
-
-                # 3. ADIM: EKLE BUTONUNA TIKLA
+                # --- 2. ADIM: SADECE EKLE BUTONUNA ODAKLAN ---
+                # "Tükendi" buton kontrolünü kaldırdık, yanıltıyor olabilir.
+                
                 try:
+                    # Butonu bulmaya çalış
                     add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                     
-                    # Normal tıklama bazen çalışmaz, JavaScript ile zorla tıklatıyoruz
+                    # Görünür alana getir ve tıkla
                     inner_driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
+                    time.sleep(1)
                     inner_driver.execute_script("arguments[0].click();", add_btn)
-                    logger.info("🖱️ Ekle butonuna tıklandı.")
                     
-                    # 4. ADIM: BEDEN LİSTESİNİ BEKLE
-                    # Modalın görünür olmasını bekle
+                    # Modal bekle
                     wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
                     
-                    # 5. ADIM: BEDENLERİ OKU
+                    # Bedenleri oku
                     size_items = inner_driver.find_elements(By.CSS_SELECTOR, "li.size-selector-list__item")
                     available_sizes = []
                     
                     for item in size_items:
                         try:
                             classes = item.get_attribute("class")
-                            # Disabled veya out-of-stock değilse al
                             if "is-disabled" not in classes and "out-of-stock" not in classes:
                                 txt = item.find_element(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']").text
                                 available_sizes.append(txt)
                         except: continue
                     
                     result['sizes'] = available_sizes
-                    if available_sizes:
-                        result['availability'] = 'in_stock'
-                    else:
-                        # Modal açıldı ama aktif beden yoksa gerçekten stok yoktur
-                        pass
-                    
+                    result['availability'] = 'in_stock' if available_sizes else 'out_of_stock'
                     result['status'] = 'success'
                     
                 except TimeoutException:
-                    # Ekle butonu var ama modal açılmadıysa veya buton bulunamadıysa
-                    # BURADA EKRAN GÖRÜNTÜSÜ ALIYORUZ Kİ SORUNU GÖRELİM
-                    logger.warning("⚠️ Zaman aşımı! Ekran görüntüsü alınıyor...")
-                    if context and chat_id:
-                        try:
-                            inner_driver.save_screenshot("debug.png")
-                        except: pass
-                    
-                    result['status'] = 'success' # Hata değil, stok yok varsay
+                    # Buton yoksa veya modal açılmadıysa
+                    logger.warning("⚠️ Ekle butonu bulunamadı.")
+                    result['status'] = 'success' # Hata değil, stok yok
+            
+            except Exception as e:
+                logger.error(f"İç Hata: {e}")
             
             finally:
-                # Eğer screenshot varsa ve chat_id verildiyse gönder (Senkron dışına taşıyacağız)
-                pass 
+                # --- SONUÇ NE OLURSA OLSUN FOTOĞRAF ÇEK ---
+                # Özellikle manuel kontrollerde (chat_id varsa)
+                if chat_id:
+                    screenshot_name = f"debug_{datetime.now().timestamp()}.png"
+                    inner_driver.save_screenshot(screenshot_name)
+                    result['screenshot'] = screenshot_name # Dosya adını kaydet
+                
                 inner_driver.quit()
+            
             return result
 
-        # İşlemi çalıştır
-        res = await loop.run_in_executor(None, sync_process)
+        # Thread içinde çalıştır
+        final_data = await loop.run_in_executor(None, sync_process)
         
-        # Hata fotoğrafı varsa gönder
-        if os.path.exists("debug.png") and context and chat_id and res['availability'] == 'out_of_stock':
+        # Eğer screenshot alındıysa gönder
+        if final_data['screenshot'] and os.path.exists(final_data['screenshot']) and context and chat_id:
+            caption_text = "📸 Botun gördüğü ekran.\n"
+            caption_text += "Durum: STOK VAR" if final_data['availability'] == 'in_stock' else "Durum: TÜKENDİ"
+            
             await context.bot.send_photo(
                 chat_id=chat_id, 
-                photo=open("debug.png", 'rb'), 
-                caption=f"❌ Stok Yok Dedi. O anki ekran görüntüsü bu.\nEğer stok görüyorsan kodda düzeltme yapmalıyız."
+                photo=open(final_data['screenshot'], 'rb'),
+                caption=caption_text
             )
-            os.remove("debug.png")
+            os.remove(final_data['screenshot']) # Temizlik
 
-        return res
+        return final_data
 
     except Exception as e:
-        logger.error(f"Sistem Hatası: {e}")
+        logger.error(f"Genel Hata: {e}")
         return result
 
 # --- TELEGRAM BOT ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Zara Bot Başladı.\nLink gönder.")
+    await update.message.reply_text("👋 Zara Bot. Link gönder.")
 
 async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
@@ -161,13 +160,13 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sadece Zara linki.")
         return
 
-    msg = await update.message.reply_text("⏳ Kontrol ediliyor...")
+    msg = await update.message.reply_text("📸 Siteye giriliyor, fotoğraf çekilip gönderilecek...")
     
-    # Chat ID'yi de gönderiyoruz ki foto atabilsin
+    # Check fonksiyonu artık fotoğrafı kendisi gönderiyor
     data = await check_stock_selenium(url, context, update.effective_chat.id)
     
     if data['status'] == 'error':
-        await msg.edit_text("❌ Hata oluştu.")
+        await msg.edit_text("❌ Kritik hata oluştu.")
         return
 
     key = f"{update.effective_user.id}_{datetime.now().timestamp()}"
@@ -182,14 +181,13 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icon = "✅" if data['availability'] == 'in_stock' else "🔴"
     sizes = ", ".join(data['sizes']) if data['sizes'] else "Tükendi"
     
-    await msg.edit_text(f"✅ *Eklendi*\n📦 {data['name']}\n{icon} Durum: {sizes}", parse_mode='Markdown')
+    await msg.edit_text(f"✅ *Takip Başladı*\n📦 {data['name']}\n{icon} Tespit Edilen: {sizes}", parse_mode='Markdown')
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Bu kısım aynı kalabilir, kısalttım)
     user_id = str(update.effective_user.id)
     my_products = {k: v for k, v in tracked_products.items() if v['user_id'] == user_id}
     if not my_products:
-        await update.message.reply_text("Boş.")
+        await update.message.reply_text("Liste boş.")
         return
     text = "Liste:\n"
     keyboard = []
@@ -210,7 +208,7 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
     if not tracked_products: return
     for key, product in list(tracked_products.items()):
         try:
-            # Otomatik kontrolde fotoğraf atmasın diye chat_id göndermiyoruz
+            # Otomatik kontrolde chat_id göndermiyoruz, her 5 dakikada bir foto atmasın
             data = await check_stock_selenium(product['url'])
             if data['status'] == 'error': continue
             
