@@ -50,7 +50,7 @@ class ZaraStockChecker:
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
 }
-        }
+        
     
     def extract_product_id(self, url: str) -> Optional[str]:
         """URL'den ürün ID'sini çıkarır"""
