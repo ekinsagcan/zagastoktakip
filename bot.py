@@ -63,31 +63,22 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                 inner_driver.get(url)
                 wait = WebDriverWait(inner_driver, 15)
                 
-                # Sayfa açılışı için bekleme
                 time.sleep(2)
 
-                # --- 0. ADIM: KONUM PENCERESİ (5 SANİYE BEKLEMELİ) ---
+                # --- 0. ADIM: KONUM PENCERESİ ---
                 try:
-                    # Butonun varlığını tespit et
                     geo_btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
-                    
-                    logger.info("🌍 Konum butonu görüldü. 5 saniye bekleniyor...")
-                    time.sleep(5) # İsteğin üzerine eklenen bekleme süresi
-                    
-                    # Tıklamayı dene (Önce JS ile zorla, olmazsa normal tıkla)
+                    logger.info("🌍 Konum butonu tespit edildi, 5sn bekleniyor...")
+                    time.sleep(5) 
                     inner_driver.execute_script("arguments[0].click();", geo_btn)
-                    logger.info("🌍 Butona tıklandı.")
-                    
-                    # Pencerenin kapanması için biraz daha bekle
                     time.sleep(3)
-                except Exception as e:
-                    logger.info(f"🌍 Konum penceresi geçildi veya hata: {e}")
+                except:
+                    logger.info("🌍 Konum penceresi geçildi.")
 
                 # --- 1. ADIM: ÇEREZLERİ KAPAT ---
                 try:
                     cookie = inner_driver.find_element(By.ID, "onetrust-accept-btn-handler")
                     inner_driver.execute_script("arguments[0].click();", cookie)
-                    logger.info("🍪 Çerezler kapatıldı.")
                 except: pass
 
                 # İsim Al
@@ -106,17 +97,43 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
                     # Modal bekle
                     wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
                     
-                    # Bedenleri oku
-                    size_items = inner_driver.find_elements(By.CSS_SELECTOR, "li.size-selector-list__item")
+                    # --- KRİTİK GÜNCELLEME: BEDENLERİN YÜKLENMESİNİ BEKLE ---
+                    time.sleep(2) # Pencere açıldıktan sonra içindeki yazıların gelmesi için bekle
+                    
+                    # --- 3. ADIM: AKILLI BEDEN TARAMA ---
+                    # Sadece tek bir class'a bakmak yerine, data-qa etiketini bulup analiz edeceğiz.
+                    labels = inner_driver.find_elements(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']")
                     available_sizes = []
                     
-                    for item in size_items:
+                    logger.info(f"Bulunan toplam beden etiketi sayısı: {len(labels)}")
+                    
+                    for label in labels:
                         try:
-                            classes = item.get_attribute("class")
-                            if "is-disabled" not in classes and "out-of-stock" not in classes:
-                                txt = item.find_element(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']").text
+                            txt = label.text.strip()
+                            if not txt: continue
+                            
+                            # JavaScript ile bu elementin veya ebeveynlerinin 'disabled' olup olmadığına bak.
+                            # Bu yöntem en garantisidir.
+                            is_disabled = inner_driver.execute_script("""
+                                var el = arguments[0];
+                                // En yakın 'li' (liste öğesi) veya 'button' ebeveynini bul
+                                var parent = el.closest('li') || el.closest('button');
+                                if (!parent) return false;
+                                
+                                // Class listesinde 'disabled', 'out-of-stock' var mı kontrol et
+                                var classes = parent.className;
+                                return classes.includes('is-disabled') || classes.includes('out-of-stock') || parent.hasAttribute('disabled');
+                            """, label)
+                            
+                            if not is_disabled:
                                 available_sizes.append(txt)
-                        except: continue
+                                logger.info(f"✅ Stokta bulundu: {txt}")
+                            else:
+                                logger.info(f"🚫 Stok yok (Disabled): {txt}")
+                                
+                        except Exception as e:
+                            logger.error(f"Beden okuma hatası: {e}")
+                            continue
                     
                     result['sizes'] = available_sizes
                     result['availability'] = 'in_stock' if available_sizes else 'out_of_stock'
@@ -143,7 +160,8 @@ async def check_stock_selenium(url: str, context: ContextTypes.DEFAULT_TYPE = No
         
         if final_data['screenshot'] and os.path.exists(final_data['screenshot']) and context and chat_id:
             caption_text = "📸 Botun gördüğü ekran.\n"
-            caption_text += "Durum: STOK VAR" if final_data['availability'] == 'in_stock' else "Durum: TÜKENDİ"
+            caption_text += f"Durum: {'STOK VAR' if final_data['availability'] == 'in_stock' else 'TÜKENDİ'}\n"
+            caption_text += f"Bulunan Bedenler: {', '.join(final_data['sizes']) if final_data['sizes'] else 'Yok'}"
             
             await context.bot.send_photo(
                 chat_id=chat_id, 
@@ -169,7 +187,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sadece Zara linki.")
         return
 
-    msg = await update.message.reply_text("📸 Kontrol ediliyor (Uzun sürebilir)...")
+    msg = await update.message.reply_text("📸 Kontrol ediliyor (5-15sn sürebilir)...")
     
     data = await check_stock_selenium(url, context, update.effective_chat.id)
     
