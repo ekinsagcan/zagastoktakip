@@ -441,8 +441,12 @@ def main():
         print("❌ TELEGRAM_BOT_TOKEN environment variable tanımlanmamış!")
         return
     
-    # Application oluştur
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Application oluştur (JobQueue ile)
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
     
     # Komut handler'ları
     application.add_handler(CommandHandler("start", start_command))
@@ -465,16 +469,19 @@ def main():
     application.add_error_handler(error_handler)
     
     # Periyodik kontrol job'u
-    job_queue = application.job_queue
-    job_queue.run_repeating(
-        periodic_check,
-        interval=CHECK_INTERVAL,
-        first=10
-    )
+    if application.job_queue is not None:
+        application.job_queue.run_repeating(
+            periodic_check,
+            interval=CHECK_INTERVAL,
+            first=10
+        )
+        logger.info(f"⏱️ Periyodik kontrol aktif - {CHECK_INTERVAL} saniye aralıklarla")
+    else:
+        logger.warning("⚠️ JobQueue başlatılamadı - periyodik kontrol çalışmayacak!")
+        logger.warning("Çözüm: pip install 'python-telegram-bot[job-queue]'")
     
     logger.info("🤖 Bot başlatılıyor...")
-    logger.info(f"✅ İzin verilen kullanıcılar: {ALLOWED_USERS}")
-    logger.info(f"⏱️ Kontrol aralığı: {CHECK_INTERVAL} saniye")
+    logger.info(f"✅ İzin verilen kullanıcılar: {ALLOWED_USERS if ALLOWED_USERS else 'Hepsi'}")
     
     # Botu başlat
     application.run_polling(allowed_updates=Update.ALL_TYPES)
