@@ -397,8 +397,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del tracked_products[key]
             await query.delete_message()
             await context.bot.send_message(query.message.chat_id, f"🗑️ <b>{product_name}</b> sildim listenden.", parse_mode=ParseMode.HTML)
-        else: try: await query.edit_message_text("Bu ürün zaten listede yok aşkım.")
-        except: pass
+        else:
+            try: await query.edit_message_text("Bu ürün zaten listede yok aşkım.")
+            except: pass
     
     elif data.startswith("refresh_"):
         key = data.replace("refresh_", "")
