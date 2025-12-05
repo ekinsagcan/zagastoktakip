@@ -2,7 +2,8 @@ import os
 import logging
 import asyncio
 import time
-from datetime import datetime
+import re
+from datetime import datetime, timedelta # timedelta eklendi (saat eklemek için)
 from typing import Dict, List
 
 # Telegram
@@ -33,11 +34,13 @@ tracked_products: Dict[str, Dict] = {}
 pending_adds: Dict[str, str] = {} 
 waiting_for_sizes: Dict[str, str] = {} 
 
-# --- YETKİ KONTROLÜ (KISKANÇ MOD) ---
+# --- YETKİ KONTROLÜ ---
 async def is_authorized(update: Update):
     user_id = str(update.effective_user.id)
     if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
-        await update.effective_message.reply_text("SEN BENİM SEVGİLİM DEĞİLSİN! HEMEN BURADAN UZAKLAŞ! 😡🔪")
+        try:
+            await update.effective_message.reply_text("SEN BENİM SEVGİLİM DEĞİLSİN! HEMEN BURADAN UZAKLAŞ! 😡🔪")
+        except: pass
         return False
     return True
 
@@ -58,8 +61,13 @@ def get_driver():
     
     return webdriver.Chrome(options=chrome_options)
 
+def clean_size_text(text):
+    if not text: return ""
+    text = text.split('\n')[0] 
+    text = re.sub(r"\(.*?\)", "", text) 
+    return text.strip()
+
 async def check_stock_selenium(url: str):
-    # Link Düzeltme
     if "zara.com" in url and "/tr/tr" not in url:
         url = url.replace("zara.com/", "zara.com/tr/tr/")
 
@@ -80,7 +88,6 @@ async def check_stock_selenium(url: str):
             driver.get(url)
             wait = WebDriverWait(driver, 10) 
 
-            # Hızlı Popup Temizliği
             try:
                 geo_btn = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                 driver.execute_script("arguments[0].click();", geo_btn)
@@ -91,7 +98,6 @@ async def check_stock_selenium(url: str):
                 driver.execute_script("arguments[0].click();", cookie)
             except: pass
 
-            # Veri Çekme
             try: result['name'] = driver.find_element(By.TAG_NAME, "h1").text
             except: pass
 
@@ -104,7 +110,6 @@ async def check_stock_selenium(url: str):
                 result['image'] = img
             except: pass
 
-            # Stok Kontrolü (Yasaklı Kelime Korumalı)
             try:
                 add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                 driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
@@ -118,17 +123,17 @@ async def check_stock_selenium(url: str):
                 
                 for label in labels:
                     try:
-                        size_name = label.text.strip()
-                        if not size_name: continue
+                        raw_text = label.text.strip()
+                        if not raw_text: continue
 
-                        # YASAKLI KELİME KONTROLÜ ("Benzer Ürünler" tuzağına düşmemek için)
-                        full_text = driver.execute_script("""
+                        full_text_script = """
                             var el = arguments[0];
                             var parent = el.closest('li') || el.closest('button');
                             return parent ? parent.innerText : '';
-                        """, label).upper()
+                        """
+                        full_text = driver.execute_script(full_text_script, label).upper()
                         
-                        forbidden = ["BENZER", "SIMILAR", "YAKINDA", "SOON", "TÜKENDİ", "OUT OF STOCK"]
+                        forbidden = ["BENZER", "SIMILAR", "YAKINDA", "SOON", "TÜKENDİ", "OUT OF STOCK", "GELİNCE"]
                         if any(f in full_text for f in forbidden): continue
 
                         is_disabled = driver.execute_script("""
@@ -139,7 +144,10 @@ async def check_stock_selenium(url: str):
                             return classes.includes('is-disabled') || classes.includes('out-of-stock') || parent.hasAttribute('disabled');
                         """, label)
                         
-                        if not is_disabled: available_sizes.append(size_name)
+                        if not is_disabled:
+                            clean_name = clean_size_text(raw_text)
+                            available_sizes.append(clean_name)
+
                     except: continue
                 
                 result['sizes'] = available_sizes
@@ -157,7 +165,7 @@ async def check_stock_selenium(url: str):
 
     return await loop.run_in_executor(None, sync_process)
 
-# --- UI TASARIMI (Aşk Dolu) ---
+# --- UI TASARIMI ---
 
 def create_ui(data, url, target_sizes):
     available_targets = []
@@ -176,6 +184,9 @@ def create_ui(data, url, target_sizes):
     tracked_str = "Tümü" if 'HEPSI' in target_sizes else ", ".join(target_sizes)
     separator = "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
     
+    # Zaman Damgası (+2 Saat)
+    check_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+
     caption = (
         f"💎 <b>{data.get('name', 'Zara Güzelliği')}</b>\n"
         f"{separator}\n"
@@ -184,6 +195,7 @@ def create_ui(data, url, target_sizes):
         f"📦 <b>Durum:</b> {status_line}\n\n"
         f"📏 <b>Bulduğum Stoklar:</b>\n"
         f"└ {sizes_formatted}\n\n"
+        f"🕒 <i>Son Kontrol: {check_time}</i>\n"
         f"🔗 <a href='{url}'>Siteye Git Aşkım</a>"
     )
     return caption
@@ -200,12 +212,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "👋 <b>Selam Aşkım!</b>\n\nSen yorulma diye Zara ürünlerini ben takip ediyorum. Linki at gerisine karışma sen. 😉❤️"
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
-# --- LİSTELEME (Şakalı Versiyon) ---
+# --- LİSTELEME (Zaman Göstergeli) ---
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
     if update.callback_query: await update.callback_query.answer()
 
-    # 1. Naz yapma aşaması
     await update.effective_message.reply_text("Listeye bakmaya üşendim şuan ya... 🥱")
     await asyncio.sleep(2)
     
@@ -216,7 +227,6 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Şaka şaka... Ama cidden listen bomboş aşkım. Link at da çalışayım biraz. 😘")
         return
 
-    # 2. Şakayı bitirme ve liste dökme
     await update.effective_message.reply_text("Şaka şaka aşkım 🥰 İşte takip ettiğimiz ciciler:")
 
     for k, v in my_products.items():
@@ -229,7 +239,11 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon = "🟢" if is_happy else "🔴"
         target_str = "Tümü" if 'HEPSI' in v['target_sizes'] else ",".join(v['target_sizes'])
         
-        text = f"{icon} <b>{v['name']}</b>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
+        # Zamanı al ve +2 saat ekle
+        last_check = v.get('last_check', datetime.now()) + timedelta(hours=2)
+        time_str = last_check.strftime("%H:%M")
+        
+        text = f"{icon} <b>{v['name']}</b>\n🕒 <i>{time_str}</i>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
         keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
@@ -304,6 +318,7 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'image': check_data['image'],
         'last_status': initial_status, 
         'target_sizes': target_sizes,
+        'last_check': datetime.now(), # ZAMAN DAMGASI
         'chat_id': update.effective_chat.id,
         'user_id': str(user_id)
     }
@@ -320,12 +335,17 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-# --- ADIM 2: BUTON CEVAPLARI ---
+# --- BUTON CEVAPLARI ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
 
     query = update.callback_query
-    await query.answer()
+    
+    if query.data.startswith("refresh_"):
+        await query.answer("⏳ Bakıyorum bebeğim...", cache_time=1)
+    else:
+        await query.answer()
+
     data = query.data
     user_id = query.from_user.id
 
@@ -361,7 +381,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.delete_message()
             await context.bot.send_message(query.message.chat_id, f"🗑️ <b>{product_name}</b> sildim listenden.", parse_mode=ParseMode.HTML)
         else:
-            await query.answer("Zaten silmişsin.", show_alert=True)
+            try: await query.edit_message_text("Bu ürün zaten listede yok aşkım.")
+            except: pass
     
     elif data.startswith("refresh_"):
         key = data.replace("refresh_", "")
@@ -370,6 +391,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             product = tracked_products[key]
             check_data = await check_stock_selenium(product['url'])
             
+            # Zamanı Güncelle
+            tracked_products[key]['last_check'] = datetime.now()
+
             if check_data['status'] == 'success':
                 current_status = 'out_of_stock'
                 if 'HEPSI' in product['target_sizes']:
@@ -382,13 +406,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_caption = create_ui(check_data, product['url'], product['target_sizes'])
                 try: 
                     await query.edit_message_caption(caption=new_caption, parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
-                    await query.answer("✅ Kontrol ettim, güncel.")
-                except: 
-                    await query.answer("✅ Değişiklik yok bebeğim.")
+                except: pass
             else:
-                await query.answer("⚠️ Hata oluştu.", show_alert=True)
+                try: await context.bot.send_message(query.message.chat_id, "⚠️ Siteye ulaşamadım aşkım, sonra tekrar dene.")
+                except: pass
 
-# --- OTOMATİK KONTROL ---
 async def check_job(context: ContextTypes.DEFAULT_TYPE):
     if not tracked_products: return
     for key, product in list(tracked_products.items()):
@@ -396,6 +418,9 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
             data = await check_stock_selenium(product['url'])
             if data['status'] == 'error': continue
             
+            # Zamanı Güncelle
+            tracked_products[key]['last_check'] = datetime.now()
+
             is_target_found = False
             found_sizes = []
             
@@ -409,7 +434,6 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
             
             current_status = 'in_stock_target' if is_target_found else 'out_of_stock'
 
-            # BİLDİRİM ZAMANI
             if product['last_status'] == 'out_of_stock' and current_status == 'in_stock_target':
                 caption = (
                     f"🚨🚨 <b>AŞKIM KOŞ STOK GELDİ!</b> 🚨🚨\n\n"
@@ -441,5 +465,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_callback))
     if app.job_queue:
         app.job_queue.run_repeating(check_job, interval=CHECK_INTERVAL, first=10)
-    print("Final Love Bot Başladı ❤️...")
+    print("Final Time Fix Bot Başladı ❤️...")
     app.run_polling()
