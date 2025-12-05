@@ -25,15 +25,15 @@ from selenium.common.exceptions import TimeoutException
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')
 ADMIN_ID = "5952744818" # SENİN ID
-CHECK_INTERVAL = 300 
+CHECK_INTERVAL = 180
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- VERİTABANI ---
 tracked_products: Dict[str, Dict] = {}
-pending_adds: Dict[int, str] = {} # Key INT
-waiting_for_sizes: Dict[int, str] = {} # Key INT
+pending_adds: Dict[int, str] = {} 
+waiting_for_sizes: Dict[int, str] = {} 
 
 # ADMIN İÇİN
 known_users: Dict[str, Dict] = {} 
@@ -44,7 +44,6 @@ async def is_authorized(update: Update):
     user = update.effective_user
     user_id = str(user.id)
     
-    # Kullanıcıyı kaydet
     if user_id not in known_users:
         known_users[user_id] = {
             'name': user.first_name,
@@ -53,7 +52,6 @@ async def is_authorized(update: Update):
             'last_msg': '-'
         }
     
-    # Admin her zaman girebilir
     if user_id == ADMIN_ID: return True
 
     if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
@@ -146,7 +144,7 @@ async def check_stock_selenium(url: str):
         return result
     return await loop.run_in_executor(None, sync_process)
 
-def create_ui(data, url, target_sizes):
+def create_ui(data, url, target_sizes, last_check_time=None):
     available_targets = []
     if 'HEPSI' in target_sizes: available_targets = data['sizes']
     else: available_targets = [s for s in data['sizes'] if s.upper() in target_sizes]
@@ -159,7 +157,11 @@ def create_ui(data, url, target_sizes):
         sizes_formatted = "<i>Pusudayım, bekliyorum...</i>"
 
     tracked_str = "Tümü" if 'HEPSI' in target_sizes else ", ".join(target_sizes)
-    check_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+    
+    if last_check_time:
+        check_time = (last_check_time + timedelta(hours=2)).strftime("%H:%M")
+    else:
+        check_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
     
     caption = (
         f"💎 <b>{data.get('name', 'Zara Güzelliği')}</b>\n"
@@ -174,7 +176,7 @@ def create_ui(data, url, target_sizes):
     )
     return caption
 
-# --- ADMIN PANELİ FONKSİYONLARI ---
+# --- ADMIN PANELİ ---
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -285,7 +287,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         known_users[user_id] = {'name': update.effective_user.first_name, 'username': update.effective_user.username, 'joined': datetime.now().strftime("%Y-%m-%d")}
     known_users[user_id]['last_msg'] = text 
 
-    # ADMIN MODU
     if user_id == ADMIN_ID and user_id in admin_reply_mode:
         target_user = admin_reply_mode.pop(user_id)
         try:
@@ -420,11 +421,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     matches = [s for s in check_data['sizes'] if s.upper() in product['target_sizes']]
                     if matches: current_status = 'in_stock_target'
                 tracked_products[key]['last_status'] = current_status
-                new_caption = create_ui(check_data, product['url'], product['target_sizes'])
+                new_caption = create_ui(check_data, product['url'], product['target_sizes'], tracked_products[key]['last_check'])
                 try: await query.edit_message_caption(caption=new_caption, parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
                 except: pass
             else:
-                try: await context.bot.send_message(query.message.chat_id, "⚠️ Siteye ulaşamadım aşkım, sonra tekrar dene.")
+                try: await context.bot.send_message(query.message.chat_id, "⚠️ Aşkım siteye giremedim bu ürün için, birazdan tekrar denerim.")
                 except: pass
 
 async def check_job(context: ContextTypes.DEFAULT_TYPE):
@@ -432,8 +433,13 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
     for key, product in list(tracked_products.items()):
         try:
             data = await check_stock_selenium(product['url'])
-            if data['status'] == 'error': continue
+            # HER DURUMDA ZAMANI GÜNCELLE
             tracked_products[key]['last_check'] = datetime.now()
+            
+            if data['status'] == 'error': 
+                # HATA DURUMUNDA BİLDİRİM
+                await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu ürüne bakamadım, site açılmıyor galiba:\n🔗 {product['url']}")
+                continue
             
             is_target_found = False
             found_sizes = []
