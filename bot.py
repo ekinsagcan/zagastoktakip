@@ -25,7 +25,7 @@ from selenium.common.exceptions import TimeoutException
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')
 ADMIN_ID = "5952744818" # SENİN ID
-CHECK_INTERVAL = 180
+CHECK_INTERVAL = 180 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -87,14 +87,18 @@ async def check_stock_selenium(url: str):
     if "zara.com" in url and "/tr/tr" not in url:
         url = url.replace("zara.com/", "zara.com/tr/tr/")
 
+    # Varsayılan durumu ERROR olarak başlatıyoruz
     result = {'status': 'error', 'name': 'Zara Ürünü', 'availability': 'out_of_stock', 'sizes': [], 'image': None, 'price': 'Fiyat Yok'}
+    
     loop = asyncio.get_running_loop()
     
     def sync_process():
         driver = get_driver()
         try:
             driver.get(url)
-            wait = WebDriverWait(driver, 10) 
+            wait = WebDriverWait(driver, 15) # Bekleme süresini biraz artırdım, hata yapmasın
+            
+            # --- POPUP TEMİZLİĞİ ---
             try:
                 geo_btn = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                 driver.execute_script("arguments[0].click();", geo_btn)
@@ -103,6 +107,8 @@ async def check_stock_selenium(url: str):
                 cookie = driver.find_element(By.ID, "onetrust-accept-btn-handler")
                 driver.execute_script("arguments[0].click();", cookie)
             except: pass
+
+            # --- VERİ ÇEKME ---
             try: result['name'] = driver.find_element(By.TAG_NAME, "h1").text
             except: pass
             try: result['price'] = driver.find_element(By.CSS_SELECTOR, ".price-current__amount, .money-amount").text
@@ -113,15 +119,18 @@ async def check_stock_selenium(url: str):
                 result['image'] = img
             except: pass
 
+            # --- STOK KONTROLÜ ---
             try:
                 add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                 driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
                 driver.execute_script("arguments[0].click();", add_btn)
+                
                 wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
                 time.sleep(1.5) 
                 
                 labels = driver.find_elements(By.CSS_SELECTOR, "[data-qa-qualifier='size-selector-sizes-size-label']")
                 available_sizes = []
+                
                 for label in labels:
                     try:
                         raw_text = label.text.strip()
@@ -135,12 +144,24 @@ async def check_stock_selenium(url: str):
                             clean_name = clean_size_text(raw_text)
                             available_sizes.append(clean_name)
                     except: continue
+                
                 result['sizes'] = available_sizes
                 result['availability'] = 'in_stock' if available_sizes else 'out_of_stock'
+                
+                # Buraya geldiyse işlem başarılıdır (Stok olsun veya olmasın, siteye girdik demektir)
                 result['status'] = 'success'
-            except TimeoutException: result['status'] = 'success'
-        except Exception as e: logger.error(f"Hata: {e}")
-        finally: driver.quit()
+
+            except TimeoutException:
+                # Buton yoksa veya açılmadıysa da siteye girmişizdir ama stok yoktur
+                result['status'] = 'success'
+                result['availability'] = 'out_of_stock'
+        
+        except Exception as e:
+            # Genel bir çökme olursa (Chrome açılmazsa vs)
+            logger.error(f"Hata: {e}")
+            result['status'] = 'error' # HATA OLARAK İŞARETLE
+        finally:
+            driver.quit()
         return result
     return await loop.run_in_executor(None, sync_process)
 
@@ -158,6 +179,7 @@ def create_ui(data, url, target_sizes, last_check_time=None):
 
     tracked_str = "Tümü" if 'HEPSI' in target_sizes else ", ".join(target_sizes)
     
+    # SAAT AYARI (+2 Saat)
     if last_check_time:
         check_time = (last_check_time + timedelta(hours=2)).strftime("%H:%M")
     else:
@@ -274,7 +296,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_check = v.get('last_check', datetime.now()) + timedelta(hours=2)
         time_str = last_check.strftime("%H:%M")
 
-        text = f"{icon} <b>{v['name']}</b>\n🕒 <i>{time_str}</i>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
+        text = f"{icon} <b>{v['name']}</b>\n🕒 <i>Son Kontrol: {time_str}</i>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
         keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
@@ -352,7 +374,8 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     key = f"{user_id}_{datetime.now().timestamp()}"
     tracked_products[key] = {
         'url': url, 'name': check_data['name'], 'price': check_data['price'], 'image': check_data['image'],
-        'last_status': initial_status, 'target_sizes': target_sizes, 'last_check': datetime.now(),
+        'last_status': initial_status, 'target_sizes': target_sizes, 
+        'last_check': datetime.now(), # ZAMAN BAŞLANGICI
         'chat_id': update.effective_chat.id, 'user_id': str(user_id)
     }
 
@@ -412,19 +435,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
             product = tracked_products[key]
             check_data = await check_stock_selenium(product['url'])
-            tracked_products[key]['last_check'] = datetime.now()
+            
+            # --- ZAMAN GÜNCELLEME MANTIĞI ---
             if check_data['status'] == 'success':
+                # Başarılı ise güncelle
+                tracked_products[key]['last_check'] = datetime.now()
+                
                 current_status = 'out_of_stock'
                 if 'HEPSI' in product['target_sizes']:
                     if check_data['availability'] == 'in_stock': current_status = 'in_stock_target'
                 else:
                     matches = [s for s in check_data['sizes'] if s.upper() in product['target_sizes']]
                     if matches: current_status = 'in_stock_target'
+                
                 tracked_products[key]['last_status'] = current_status
                 new_caption = create_ui(check_data, product['url'], product['target_sizes'], tracked_products[key]['last_check'])
                 try: await query.edit_message_caption(caption=new_caption, parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
                 except: pass
             else:
+                # Başarısız ise güncelleme VE mesaj at
                 try: await context.bot.send_message(query.message.chat_id, "⚠️ Aşkım siteye giremedim bu ürün için, birazdan tekrar denerim.")
                 except: pass
 
@@ -433,13 +462,15 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
     for key, product in list(tracked_products.items()):
         try:
             data = await check_stock_selenium(product['url'])
-            # HER DURUMDA ZAMANI GÜNCELLE
-            tracked_products[key]['last_check'] = datetime.now()
             
+            # --- ZAMAN GÜNCELLEME MANTIĞI ---
             if data['status'] == 'error': 
-                # HATA DURUMUNDA BİLDİRİM
-                await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu ürüne bakamadım, site açılmıyor galiba:\n🔗 {product['url']}")
-                continue
+                # Hata varsa saati GÜNCELLEME ve mesaj at
+                await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu ürüne bakamadım, site açılmıyor:\n🔗 {product['url']}")
+                continue 
+            
+            # Başarılı ise saati güncelle
+            tracked_products[key]['last_check'] = datetime.now()
             
             is_target_found = False
             found_sizes = []
