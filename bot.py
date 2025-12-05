@@ -4,7 +4,7 @@ import asyncio
 import time
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Set
+from typing import Dict, List
 
 # Telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -23,30 +23,28 @@ from selenium.common.exceptions import TimeoutException
 
 # --- AYARLAR ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-# Normal kullanıcılar için izin listesi
 ALLOWED_USERS = os.getenv('ALLOWED_USERS', '').split(',')
-# ADMIN ID (Senin ID'n)
-ADMIN_ID = "5952744818"
+ADMIN_ID = "5952744818" # SENİN ID
 CHECK_INTERVAL = 300 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- VERİTABANI (BELLEK) ---
+# --- VERİTABANI ---
 tracked_products: Dict[str, Dict] = {}
 pending_adds: Dict[str, str] = {} 
 waiting_for_sizes: Dict[str, str] = {} 
 
-# ADMIN İÇİN VERİLER
-known_users: Dict[str, Dict] = {} # {id: {'name': 'Ali', 'username': '@ali', 'last_msg': '...'}}
-admin_reply_mode: Dict[str, str] = {} # Admin şu an kime mesaj yazıyor? {admin_id: target_user_id}
+# ADMIN İÇİN
+known_users: Dict[str, Dict] = {} 
+admin_reply_mode: Dict[str, str] = {} 
 
 # --- YETKİ KONTROLÜ ---
 async def is_authorized(update: Update):
     user = update.effective_user
     user_id = str(user.id)
     
-    # Her etkileşimde kullanıcıyı kaydet (Admin paneli için)
+    # Kullanıcıyı kaydet
     if user_id not in known_users:
         known_users[user_id] = {
             'name': user.first_name,
@@ -55,8 +53,10 @@ async def is_authorized(update: Update):
             'last_msg': '-'
         }
     
-    # Kullanıcı izin listesinde mi?
-    if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != [''] and user_id != ADMIN_ID:
+    # İzin kontrolü (Admin her zaman girebilir)
+    if user_id == ADMIN_ID: return True
+
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
         try:
             await update.effective_message.reply_text("SEN BENİM SEVGİLİM DEĞİLSİN! HEMEN BURADAN UZAKLAŞ! 😡🔪")
         except: pass
@@ -174,27 +174,23 @@ def create_ui(data, url, target_sizes):
     )
     return caption
 
-# --- ADMIN PANELİ FONKSİYONLARI --- 
-
-[Image of admin panel flow diagram]
-
+# --- ADMIN PANELİ FONKSİYONLARI ---
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id != ADMIN_ID: return # Başkası yazarsa sessiz kal
+    if user_id != ADMIN_ID: return 
 
-    # Admin Menüsü
     keyboard = [
         [InlineKeyboardButton("👥 Kullanıcıları Listele", callback_data="adm_list_users")],
         [InlineKeyboardButton("❌ Paneli Kapat", callback_data="adm_close")]
     ]
-    await update.message.reply_text("👮‍♂️ <b>Admin Paneline Hoş Geldin</b>\nNe yapmak istersin?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    await update.message.reply_text("👮‍♂️ <b>Admin Paneli</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     
-    if not data.startswith("adm_"): return # Admin komutu değilse çık
+    if not data.startswith("adm_"): return 
 
     await query.answer()
     
@@ -204,58 +200,48 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "adm_list_users":
         if not known_users:
-            await query.edit_message_text("Henüz kayıtlı kullanıcı yok.")
+            await query.edit_message_text("Kayıtlı kullanıcı yok.")
             return
         
         keyboard = []
         for uid, udata in known_users.items():
             name = udata.get('name', 'Bilinmeyen')
-            keyboard.append([InlineKeyboardButton(f"👤 {name} ({uid})", callback_data=f"adm_view_{uid}")])
+            keyboard.append([InlineKeyboardButton(f"👤 {name}", callback_data=f"adm_view_{uid}")])
         
         keyboard.append([InlineKeyboardButton("🔙 Geri", callback_data="adm_menu")])
-        await query.edit_message_text("👥 <b>Kayıtlı Kullanıcılar:</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        await query.edit_message_text("👥 <b>Kullanıcılar:</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
     elif data.startswith("adm_view_"):
         target_id = data.replace("adm_view_", "")
         user_data = known_users.get(target_id, {})
         
-        # Kullanıcının ürünlerini say
         user_products = {k: v for k, v in tracked_products.items() if v['user_id'] == target_id}
         prod_list_str = ""
         for k, v in user_products.items():
-            prod_list_str += f"• {v['name'][:20]}... ({v['last_status']})\n"
+            prod_list_str += f"• {v['name'][:15]}... ({v['last_status']})\n"
         
-        if not prod_list_str: prod_list_str = "Takip ettiği ürün yok."
+        if not prod_list_str: prod_list_str = "Takip yok."
 
         info_text = (
-            f"👤 <b>Kullanıcı Detayı</b>\n\n"
-            f"🆔 ID: <code>{target_id}</code>\n"
-            f"📛 İsim: {user_data.get('name')}\n"
-            f"🔗 Username: @{user_data.get('username', 'Yok')}\n"
-            f"📅 Kayıt: {user_data.get('joined')}\n\n"
-            f"💬 <b>Son Mesajı:</b>\n<i>{user_data.get('last_msg')}</i>\n\n"
-            f"📦 <b>Takip Listesi ({len(user_products)}):</b>\n{prod_list_str}"
+            f"👤 <b>Kullanıcı: {user_data.get('name')}</b>\n"
+            f"🆔 <code>{target_id}</code>\n"
+            f"💬 Son: <i>{user_data.get('last_msg')}</i>\n\n"
+            f"📦 <b>Liste ({len(user_products)}):</b>\n{prod_list_str}"
         )
         
         keyboard = [
-            [InlineKeyboardButton("📩 Mesaj Gönder", callback_data=f"adm_msg_{target_id}")],
-            [InlineKeyboardButton("🔙 Listeye Dön", callback_data="adm_list_users")]
+            [InlineKeyboardButton("📩 Mesaj At", callback_data=f"adm_msg_{target_id}")],
+            [InlineKeyboardButton("🔙 Dön", callback_data="adm_list_users")]
         ]
         await query.edit_message_text(info_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
     elif data.startswith("adm_msg_"):
         target_id = data.replace("adm_msg_", "")
-        admin_reply_mode[ADMIN_ID] = target_id # Admini yazma moduna al
-        
-        await query.edit_message_text(
-            f"✍️ <b>Kullanıcıya ({target_id}) mesajını yaz:</b>\n"
-            "Göndereceğin bir sonraki metin mesajı bu kullanıcıya iletilecek.\n\n"
-            "<i>İptal etmek için /cancel yazabilirsin (henüz yok ama boş ver :D)</i>",
-            parse_mode=ParseMode.HTML
-        )
+        admin_reply_mode[ADMIN_ID] = target_id 
+        await query.edit_message_text(f"✍️ <b>{target_id}</b> kullanıcısına mesajını yaz:", parse_mode=ParseMode.HTML)
     
     elif data == "adm_menu":
-        await admin_command(update, context) # Ana menüye dön
+        await admin_command(update, context)
 
 # --- GENEL HANDLERS ---
 
@@ -282,48 +268,47 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k, v in my_products.items():
         icon = "🟢" if v['last_status'] == 'in_stock' or v['last_status'] == 'in_stock_target' else "🔴"
         target_str = "Tümü" if 'HEPSI' in v['target_sizes'] else ",".join(v['target_sizes'])
-        text = f"{icon} <b>{v['name']}</b>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
+        
+        last_check = v.get('last_check', datetime.now()) + timedelta(hours=2)
+        time_str = last_check.strftime("%H:%M")
+
+        text = f"{icon} <b>{v['name']}</b>\n🕒 <i>{time_str}</i>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
         keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
-# --- MESAJ YÖNETİCİSİ (HEM ADMIN HEM KULLANICI) ---
+# --- MESAJ YÖNETİCİSİ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text
 
-    # Kullanıcıyı kaydet (Admin paneli için)
     if user_id not in known_users:
         known_users[user_id] = {'name': update.effective_user.first_name, 'username': update.effective_user.username, 'joined': datetime.now().strftime("%Y-%m-%d")}
-    known_users[user_id]['last_msg'] = text # Son mesajı güncelle
+    known_users[user_id]['last_msg'] = text 
 
-    # 1. ADMIN CEVAP MODU KONTROLÜ
+    # ADMIN MODU
     if user_id == ADMIN_ID and user_id in admin_reply_mode:
-        target_user = admin_reply_mode.pop(user_id) # Moddan çık
+        target_user = admin_reply_mode.pop(user_id)
         try:
             await context.bot.send_message(chat_id=target_user, text=f"👨‍💻 <b>Admin Mesajı:</b>\n\n{text}", parse_mode=ParseMode.HTML)
-            await update.message.reply_text(f"✅ Mesaj iletildi (ID: {target_user})")
+            await update.message.reply_text(f"✅ İletildi.")
         except Exception as e:
-            await update.message.reply_text(f"❌ Gönderilemedi: {e}")
+            await update.message.reply_text(f"❌ Hata: {e}")
         return
 
-    # Yetki Kontrolü
     if not await is_authorized(update): return
 
-    # 2. LİNK KONTROLÜ
     if "zara.com" in text:
         pending_adds[user_id] = text
         if user_id in waiting_for_sizes: del waiting_for_sizes[user_id]
         keyboard = [[InlineKeyboardButton("Evet çok seviyorum ❤️", callback_data="love_yes")], [InlineKeyboardButton("Hayır ⚠️", callback_data="love_no")]]
-        await update.message.reply_text("🤔 <b>Bir saniye... Önce çok önemli bir soru:</b>\n\nSevgilini seviyor musun?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        await update.message.reply_text("🤔 <b>Bir saniye... Önce önemli bir soru:</b>\n\nSevgilini seviyor musun?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         return
 
-    # 3. BEDEN CEVABI KONTROLÜ
     if user_id in waiting_for_sizes:
         await process_size_input(update, context)
         return
 
-    # 4. BOŞ MUHABBET
-    if user_id != ADMIN_ID: # Admin değilse ve komut değilse
+    if user_id != ADMIN_ID:
         await update.message.reply_text("❌ Aşkım ya Zara linki at ya da sorduğumda beden yaz, kafamı karıştırma.", parse_mode=ParseMode.HTML)
 
 # --- BEDEN GİRİŞİ ---
@@ -378,12 +363,10 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # ÖNCE ADMİN CALLBACKLERİNİ KONTROL ET (Yetki kontrolüne takılmasın)
     if query.data.startswith("adm_"):
         await admin_callback(update, context)
         return
 
-    # Normal kullanıcı işlemleri için yetki kontrolü
     if not await is_authorized(update): return
 
     if query.data.startswith("refresh_"): await query.answer("⏳ Bakıyorum bebeğim...", cache_time=1)
@@ -476,9 +459,9 @@ if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_products))
-    app.add_handler(CommandHandler("admin", admin_command)) # Admin Komutu
+    app.add_handler(CommandHandler("admin", admin_command)) 
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)) # Mesaj Yönetici
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)) 
     if app.job_queue: app.job_queue.run_repeating(check_job, interval=CHECK_INTERVAL, first=10)
     print("Admin + Love Bot Başladı 🚀...")
     app.run_polling()
