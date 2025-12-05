@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 # --- VERİTABANI ---
 tracked_products: Dict[str, Dict] = {}
-pending_adds: Dict[int, str] = {} # Key INT oldu (Daha güvenli)
-waiting_for_sizes: Dict[int, str] = {} # Key INT oldu
+pending_adds: Dict[int, str] = {} # Key INT
+waiting_for_sizes: Dict[int, str] = {} # Key INT
 
 # ADMIN İÇİN
 known_users: Dict[str, Dict] = {} 
@@ -44,6 +44,7 @@ async def is_authorized(update: Update):
     user = update.effective_user
     user_id = str(user.id)
     
+    # Kullanıcıyı kaydet
     if user_id not in known_users:
         known_users[user_id] = {
             'name': user.first_name,
@@ -52,6 +53,7 @@ async def is_authorized(update: Update):
             'last_msg': '-'
         }
     
+    # Admin her zaman girebilir
     if user_id == ADMIN_ID: return True
 
     if ALLOWED_USERS and user_id not in ALLOWED_USERS and ALLOWED_USERS != ['']:
@@ -172,10 +174,7 @@ def create_ui(data, url, target_sizes):
     )
     return caption
 
-# --- ADMIN PANELİ --- 
-
-[Image of admin panel flow diagram]
-
+# --- ADMIN PANELİ FONKSİYONLARI ---
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -286,6 +285,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         known_users[user_id] = {'name': update.effective_user.first_name, 'username': update.effective_user.username, 'joined': datetime.now().strftime("%Y-%m-%d")}
     known_users[user_id]['last_msg'] = text 
 
+    # ADMIN MODU
     if user_id == ADMIN_ID and user_id in admin_reply_mode:
         target_user = admin_reply_mode.pop(user_id)
         try:
@@ -298,17 +298,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
 
     if "zara.com" in text:
-        # User ID'yi Integer olarak kaydet (String/Int karışıklığını önlemek için)
         uid_int = update.effective_user.id
         pending_adds[uid_int] = text
-        
         if uid_int in waiting_for_sizes: del waiting_for_sizes[uid_int]
-        
         keyboard = [[InlineKeyboardButton("Evet çok seviyorum ❤️", callback_data="love_yes")], [InlineKeyboardButton("Hayır ⚠️", callback_data="love_no")]]
         await update.message.reply_text("🤔 <b>Bir saniye... Önce önemli bir soru:</b>\n\nSevgilini seviyor musun?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         return
 
-    # User ID kontrolü (Int olarak)
     if update.effective_user.id in waiting_for_sizes:
         await process_size_input(update, context)
         return
@@ -318,11 +314,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BEDEN GİRİŞİ ---
 async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id # INT
+    user_id = update.effective_user.id
     raw_text = update.message.text.upper().strip() 
     
-    if user_id not in waiting_for_sizes:
-        return
+    if user_id not in waiting_for_sizes: return
 
     url = waiting_for_sizes[user_id]
 
@@ -382,17 +377,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: await query.answer()
 
     data = query.data
-    user_id = query.from_user.id # INT olarak gelir
+    user_id = query.from_user.id
 
     if data == "love_yes":
-        # Key olarak INT kullanıyoruz
         if user_id not in pending_adds:
             await query.edit_message_text("⚠️ Link zaman aşımına uğradı, tekrar atar mısın aşkım?")
             return
-        
         url = pending_adds.pop(user_id)
         waiting_for_sizes[user_id] = url
-        
         await query.edit_message_text("🥰 <b>Ben de seni çok seviyorum aşkımmm!</b>\n\nPeki hangi bedenleri takip edeyim?\n👉 Bedenleri virgülle ayırarak yaz (Örn: <b>XS, S</b>)\n👉 Fark etmez diyorsan <b>Hepsi</b> yaz.", parse_mode=ParseMode.HTML)
 
     elif data == "love_no":
