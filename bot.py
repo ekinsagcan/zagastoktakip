@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # --- VERİTABANI ---
 tracked_products: Dict[str, Dict] = {}
 pending_adds: Dict[int, str] = {} 
-waiting_for_sizes: Dict[int, Dict] = {} # {user_id: {'url': '...', 'type': 'shoes'}} şeklinde güncelledim
+waiting_for_sizes: Dict[int, Dict] = {} # {user_id: {'url': '...', 'category': '...'}}
 
 # ADMIN İÇİN
 known_users: Dict[str, Dict] = {} 
@@ -94,7 +94,7 @@ async def check_stock_selenium(url: str):
         'sizes': [], 
         'image': None, 
         'price': 'Fiyat Yok',
-        'category': 'clothing' # Varsayılan: Kıyafet
+        'category': 'clothing'
     }
     
     loop = asyncio.get_running_loop()
@@ -114,7 +114,6 @@ async def check_stock_selenium(url: str):
                 driver.execute_script("arguments[0].click();", cookie)
             except: pass
 
-            # --- VERİ VE KATEGORİ ANALİZİ ---
             try: result['name'] = driver.find_element(By.TAG_NAME, "h1").text
             except: pass
             try: result['price'] = driver.find_element(By.CSS_SELECTOR, ".price-current__amount, .money-amount").text
@@ -125,16 +124,10 @@ async def check_stock_selenium(url: str):
                 result['image'] = img
             except: pass
 
-            # KELİME BAZLI KATEGORİ BELİRLEME
+            # --- KATEGORİ BELİRLEME ---
             u_name = result['name'].upper()
-            
-            # 1. Çanta/Aksesuar (Beden Sorma)
             acc_keywords = ["ÇANTA", "BAG", "PARFÜM", "PERFUME", "KOLYE", "KÜPE", "ŞAL", "KEMER", "CÜZDAN", "WALLET"]
-            
-            # 2. Ayakkabı
             shoe_keywords = ["AYAKKABI", "BOT", "ÇİZME", "MAKOSEN", "TOPUKLU", "SANDALET", "TERLİK", "SNEAKER", "BAMBA", "SHOES", "BOOTS"]
-            
-            # 3. Jean/Pantolon
             jean_keywords = ["JEAN", "DENIM", "PANTOLON", "TROUSERS"]
 
             if any(k in u_name for k in acc_keywords):
@@ -144,7 +137,7 @@ async def check_stock_selenium(url: str):
             elif any(k in u_name for k in jean_keywords):
                 result['category'] = 'jeans'
             else:
-                result['category'] = 'clothing' # Tişört, Elbise vs.
+                result['category'] = 'clothing'
 
             # --- AKSESUAR KONTROLÜ (Direkt Ekle Butonu) ---
             if result['category'] == 'accessory':
@@ -230,13 +223,13 @@ def create_ui(data, url, target_sizes, last_check_time=None):
         tracked_str = "Tümü" if 'HEPSI' in target_sizes else ", ".join(target_sizes)
     
     if last_check_time:
-        check_time = (last_check_time + timedelta(hours=3)).strftime("%H:%M")
+        check_time = (last_check_time + timedelta(hours=2)).strftime("%H:%M") # SAAT AYARI (+2)
     else:
-        check_time = (datetime.now() + timedelta(hours=3)).strftime("%H:%M")
+        check_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
     
     caption = (
         f"💎 <b>{data.get('name', 'Zara Güzelliği')}</b>\n"
-        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         f"🏷 <b>Fiyat:</b> {data.get('price', '-')}\n"
         f"🎯 <b>Takip:</b> {tracked_str}\n"
         f"📦 <b>Durum:</b> {status_line}\n\n"
@@ -294,8 +287,8 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not my_products: await update.effective_message.reply_text("Şaka şaka... Listen boş aşkım."); return
     await update.effective_message.reply_text("Şaka şaka aşkım 🥰 İşte listen:")
     for k, v in my_products.items():
+        # Kategoriye göre durum belirleme
         is_happy = False
-        # Çanta kontrolü (category check)
         if v.get('category') == 'accessory':
             is_happy = (v['last_status'] == 'in_stock')
             target_str = "Standart"
@@ -305,7 +298,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_str = "Tümü" if 'HEPSI' in v['target_sizes'] else ",".join(v['target_sizes'])
 
         icon = "🟢" if is_happy else "🔴"
-        last_check = v.get('last_check', datetime.now()) + timedelta(hours=3)
+        last_check = v.get('last_check', datetime.now()) + timedelta(hours=2)
         time_str = last_check.strftime("%H:%M")
         text = f"{icon} <b>{v['name']}</b>\n🕒 <i>{time_str}</i>\n🎯 Hedef: {target_str}\n🔗 <a href='{v['url']}'>Link</a>"
         keyboard = [[InlineKeyboardButton("🗑️ Sil", callback_data=f"del_{k}")]]
@@ -358,10 +351,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(user_id, "⚠️ Siteye giremedim aşkım.")
             return
 
-        # KATEGORİYE GÖRE DAVRAN
         cat = check_data.get('category', 'clothing')
         
-        # ÇANTA İSE
+        # ÇANTA/AKSESUAR İSE DİREKT EKLE
         if cat == 'accessory':
             key = f"{user_id}_{datetime.now().timestamp()}"
             tracked_products[key] = {
@@ -374,19 +366,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if check_data['image']: await context.bot.send_photo(user_id, photo=check_data['image'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
             else: await context.bot.send_message(user_id, caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
         
-        # AYAKKABI VEYA JEAN İSE
         else:
-            # Bilgileri sakla ki cevap gelince tekrar siteye gitmeye gerek kalmasın (URL'yi saklıyoruz)
+            # BEDEN SOR
             waiting_for_sizes[user_id] = {'url': url, 'category': cat}
-            
             msg = "Peki hangi bedeni takip edeyim?"
-            if cat == 'shoes':
-                msg = "👠 <b>Bu bir ayakkabı!</b> Hangi numaraları takip edeyim?\n👉 Örn: <b>36, 37, 38</b>"
-            elif cat == 'jeans':
-                msg = "👖 <b>Bu bir Jean!</b> Hangi bedenleri takip edeyim?\n👉 Örn: <b>34, 36</b> veya <b>XS, S</b>"
-            else:
-                msg = "👗 Hangi bedenleri takip edeyim?\n👉 Örn: <b>XS, S</b> veya <b>Hepsi</b>"
-                
+            if cat == 'shoes': msg = "👠 <b>Ayakkabı bu!</b> Hangi numaralar? (Örn: <b>37, 38</b>)"
+            elif cat == 'jeans': msg = "👖 <b>Jean bu!</b> Beden ne? (Örn: <b>34, 36</b> veya <b>XS, S</b>)"
+            else: msg = "👗 Hangi bedenler? (Örn: <b>XS, S</b> veya <b>Hepsi</b>)"
             await context.bot.send_message(user_id, msg, parse_mode=ParseMode.HTML)
 
     elif data == "love_no":
@@ -397,8 +383,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("del_"):
         key = data.replace("del_", "")
         if key in tracked_products: del tracked_products[key]; await query.delete_message(); await context.bot.send_message(query.message.chat_id, "🗑️ Silindi.")
-        else: try: await query.edit_message_text("Zaten yok.")
-        except: pass
+        else:
+            try: await query.edit_message_text("Zaten yok.")
+            except: pass
     
     elif data.startswith("refresh_"):
         key = data.replace("refresh_", "")
@@ -420,10 +407,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     raw_text = update.message.text.upper().strip()
-    
     if user_id not in waiting_for_sizes: return
     
-    # Saklanan veriyi al
     saved_data = waiting_for_sizes[user_id]
     url = saved_data['url']
     cat = saved_data['category']
@@ -447,7 +432,6 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if 'HEPSI' in target_sizes:
         if check_data['availability'] == 'in_stock': initial_status = 'in_stock_target'
     else:
-        # Beden eşleştirme
         matches = [s for s in check_data['sizes'] if s.upper() in target_sizes]
         if matches: initial_status = 'in_stock_target'
 
@@ -459,7 +443,7 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     
     caption = create_ui(check_data, url, target_sizes)
-    keyboard = [[InlineKeyboardButton("🔄 Yenile", callback_data=f"refresh_{key}"), InlineKeyboardButton("❌ Sil", callback_data=f"del_{key}")], [InlineKeyboardButton("📋 Listem", callback_data="show_list")]]
+    keyboard = [[InlineKeyboardButton("🔄", callback_data=f"refresh_{key}"), InlineKeyboardButton("❌", callback_data=f"del_{key}")], [InlineKeyboardButton("📋 Listem", callback_data="show_list")]]
     
     if check_data['image']: await update.message.reply_photo(photo=check_data['image'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
     else: await update.message.reply_text(text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -469,27 +453,30 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
     for key, product in list(tracked_products.items()):
         try:
             data = await check_stock_selenium(product['url'])
-            tracked_products[key]['last_check'] = datetime.now()
             
+            # --- HATA DURUMU VE ZAMAN ---
             if data['status'] == 'error':
-                await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu siteye giremedim:\n{product['url']}")
-                continue
+                # Hata varsa saati güncelleme, mesaj at (ama spam olmasın diye loga yazabilirsin)
+                # İstersen burayı aktif et: await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu ürüne bakamadım: {product['name']}")
+                continue 
+            
+            # Sadece başarılıysa saati güncelle
+            tracked_products[key]['last_check'] = datetime.now()
 
             is_target_found = False
-            found_sizes = []
             if product.get('category') == 'accessory':
                 is_target_found = (data['availability'] == 'in_stock')
             else:
                 if 'HEPSI' in product['target_sizes']:
-                    if data['availability'] == 'in_stock': is_target_found = True; found_sizes = data['sizes']
+                    if data['availability'] == 'in_stock': is_target_found = True
                 else:
-                    found_sizes = [s for s in data['sizes'] if s.upper() in product['target_sizes']]
-                    if found_sizes: is_target_found = True
+                    found = [s for s in data['sizes'] if s.upper() in product['target_sizes']]
+                    if found: is_target_found = True
             
             current_status = 'in_stock_target' if is_target_found else 'out_of_stock'
 
             if product['last_status'] == 'out_of_stock' and current_status == 'in_stock_target':
-                caption = (f"🚨🚨 <b>AŞKIM KOŞ STOK GELDİ!</b> 🚨🚨\n\n💎 <b>{data['name']}</b>\n🎯 İstediğin: {', '.join(product['target_sizes'])}\n✅ <b>Gelenler:</b> <code>{', '.join(found_sizes)}</code>\n\n👇 <b>HEMEN AL BUTONUNA BAS!</b>")
+                caption = (f"🚨🚨 <b>AŞKIM KOŞ STOK GELDİ!</b> 🚨🚨\n\n💎 <b>{data['name']}</b>\n🎯 İstediğin: {', '.join(product['target_sizes'])}\n👇 <b>HEMEN AL!</b>")
                 keyboard = [[InlineKeyboardButton("🛒 SATIN AL", url=product['url'])]]
                 if product.get('image'):
                     try: await context.bot.send_photo(product['chat_id'], photo=product['image'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
