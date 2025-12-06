@@ -94,7 +94,7 @@ async def check_stock_selenium(url: str):
         'sizes': [], 
         'image': None, 
         'price': 'Fiyat Yok',
-        'is_one_size': False # Tek beden mi?
+        'is_one_size': False
     }
     
     loop = asyncio.get_running_loop()
@@ -105,7 +105,6 @@ async def check_stock_selenium(url: str):
             driver.get(url)
             wait = WebDriverWait(driver, 15)
             
-            # --- POPUP TEMİZLİĞİ ---
             try:
                 geo_btn = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-qa-action='stay-in-store']")))
                 driver.execute_script("arguments[0].click();", geo_btn)
@@ -115,7 +114,6 @@ async def check_stock_selenium(url: str):
                 driver.execute_script("arguments[0].click();", cookie)
             except: pass
 
-            # --- VERİ ÇEKME ---
             try: result['name'] = driver.find_element(By.TAG_NAME, "h1").text
             except: pass
             try: result['price'] = driver.find_element(By.CSS_SELECTOR, ".price-current__amount, .money-amount").text
@@ -127,38 +125,31 @@ async def check_stock_selenium(url: str):
             except: pass
 
             # --- TEK BEDEN (ÇANTA) KONTROLÜ ---
-            # Ürün adında ÇANTA, PARFÜM, KOLYE vb. geçiyor mu?
-            keywords = ["ÇANTA", "BAG", "PARFÜM", "PERFUME", "KOLYE", "KÜPE", "ŞAL", "KEMER"]
+            keywords = ["ÇANTA", "BAG", "PARFÜM", "PERFUME", "KOLYE", "KÜPE", "ŞAL", "KEMER", "CÜZDAN", "WALLET"]
             is_accessory = any(k in result['name'].upper() for k in keywords)
             
             if is_accessory:
                 result['is_one_size'] = True
-                # Çanta mantığı: Ekle butonu var mı ve aktif mi?
                 try:
                     add_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
-                    
-                    # Buton disable mı?
                     if add_btn.is_enabled() and "disabled" not in add_btn.get_attribute("class"):
                         result['availability'] = 'in_stock'
                         result['sizes'] = ['Standart']
                     else:
                         result['availability'] = 'out_of_stock'
-                    
                     result['status'] = 'success'
-                    return result # Çanta ise burada bitir
+                    return result
                 except:
-                    # Buton yoksa stok yok
                     result['status'] = 'success'
                     result['availability'] = 'out_of_stock'
                     return result
 
-            # --- NORMAL (BEDENLİ) ÜRÜN KONTROLÜ ---
+            # --- NORMAL (BEDENLİ) ÜRÜN ---
             try:
                 add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-qa-action='add-to-cart']")))
                 driver.execute_script("arguments[0].scrollIntoView(true);", add_btn)
                 driver.execute_script("arguments[0].click();", add_btn)
                 
-                # Modal bekle
                 wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-qa-qualifier='size-selector-sizes-size-label']")))
                 time.sleep(1.5) 
                 
@@ -186,7 +177,6 @@ async def check_stock_selenium(url: str):
                 result['status'] = 'success'
 
             except TimeoutException:
-                # Buton yok veya modal açılmadı -> Stok yok
                 result['status'] = 'success'
                 result['availability'] = 'out_of_stock'
         
@@ -201,7 +191,6 @@ async def check_stock_selenium(url: str):
 def create_ui(data, url, target_sizes, last_check_time=None):
     available_targets = []
     
-    # Çanta ise (Tek Beden) özel durum
     if data.get('is_one_size'):
         if data['availability'] == 'in_stock':
             status_line = "🟢 <b>STOKTA MEVCUT!</b>"
@@ -211,7 +200,6 @@ def create_ui(data, url, target_sizes, last_check_time=None):
             sizes_formatted = "<i>Stokta yok</i>"
         tracked_str = "Standart"
     else:
-        # Normal Bedenli Ürün
         if 'HEPSI' in target_sizes: available_targets = data['sizes']
         else: available_targets = [s for s in data['sizes'] if s.upper() in target_sizes]
 
@@ -230,7 +218,7 @@ def create_ui(data, url, target_sizes, last_check_time=None):
     
     caption = (
         f"💎 <b>{data.get('name', 'Zara Güzelliği')}</b>\n"
-        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         f"🏷 <b>Fiyat:</b> {data.get('price', '-')}\n"
         f"🎯 <b>Takip:</b> {tracked_str}\n"
         f"📦 <b>Durum:</b> {status_line}\n\n"
@@ -241,7 +229,7 @@ def create_ui(data, url, target_sizes, last_check_time=None):
     )
     return caption
 
-# --- ADMIN PANELİ --- (Aynı kaldı, kısaltıldı)
+# --- ADMIN PANELİ ---
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID: return 
@@ -288,7 +276,6 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not my_products: await update.effective_message.reply_text("Şaka şaka... Listen boş aşkım."); return
     await update.effective_message.reply_text("Şaka şaka aşkım 🥰 İşte listen:")
     for k, v in my_products.items():
-        # Çanta kontrolü (is_one_size)
         is_happy = False
         if v.get('is_one_size'):
             is_happy = (v['last_status'] == 'in_stock')
@@ -342,18 +329,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in pending_adds: await query.edit_message_text("⚠️ Link zaman aşımı."); return
         url = pending_adds.pop(user_id)
         
-        # --- İLK KONTROL (ÇANTA MI KIYAFET Mİ?) ---
         await query.edit_message_text("🥰 <b>Ben de seni çok seviyorum aşkımmm!</b>\n\nÜrünü analiz ediyorum, 10sn bekle...", parse_mode=ParseMode.HTML)
         await context.bot.send_chat_action(chat_id=user_id, action="typing")
         
-        # Önce ürünü kontrol et
         check_data = await check_stock_selenium(url)
         
         if check_data['status'] == 'error':
             await context.bot.send_message(user_id, "⚠️ Siteye giremedim aşkım.")
             return
 
-        # ÇANTA İSE (BEDEN SORMA, DİREKT EKLE)
         if check_data['is_one_size']:
             key = f"{user_id}_{datetime.now().timestamp()}"
             tracked_products[key] = {
@@ -368,8 +352,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await context.bot.send_message(user_id, caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
         
         else:
-            # KIYAFET İSE (BEDEN SORMAYA GEÇ)
-            waiting_for_sizes[user_id] = url # URL'yi sakla
+            waiting_for_sizes[user_id] = url 
             await context.bot.send_message(user_id, "Peki hangi bedenleri takip edeyim?\n👉 <b>XS, S</b> gibi yaz veya <b>Hepsi</b> de.", parse_mode=ParseMode.HTML)
 
     elif data == "love_no":
@@ -380,8 +363,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("del_"):
         key = data.replace("del_", "")
         if key in tracked_products: del tracked_products[key]; await query.delete_message(); await context.bot.send_message(query.message.chat_id, "🗑️ Silindi.")
-        else: try: await query.edit_message_text("Zaten yok.")
-        except: pass
+        else:
+            try: await query.edit_message_text("Zaten yok.")
+            except: pass
     
     elif data.startswith("refresh_"):
         key = data.replace("refresh_", "")
@@ -392,7 +376,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tracked_products[key]['last_check'] = datetime.now()
             
             if check_data['status'] == 'success':
-                tracked_products[key]['last_status'] = check_data['availability'] # Basit güncelleme
+                tracked_products[key]['last_status'] = check_data['availability']
                 new_caption = create_ui(check_data, product['url'], product['target_sizes'], tracked_products[key]['last_check'])
                 try: await query.edit_message_caption(caption=new_caption, parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
                 except: pass
@@ -415,11 +399,13 @@ async def process_size_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text(f"Tamamdır, <b>{', '.join(target_sizes)}</b> için bakıyorum...", parse_mode=ParseMode.HTML)
     
-    # Tekrar kontrol etmeye gerek yok, ilk kontrolden veriyi saklayabilirdik ama 
-    # taze veri için tekrar bakmak daha güvenli.
     check_data = await check_stock_selenium(url)
     
-    # Durum Belirleme
+    # --- ERROR KONTROLÜ DÜZELTİLDİ ---
+    if check_data['status'] == 'error':
+        await update.message.reply_text("⚠️ Siteye giremedim bebeğim, sonra deneriz.")
+        return
+
     initial_status = 'out_of_stock'
     if 'HEPSI' in target_sizes:
         if check_data['availability'] == 'in_stock': initial_status = 'in_stock_target'
@@ -451,16 +437,16 @@ async def check_job(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(product['chat_id'], f"⚠️ Aşkım şu siteye giremedim:\n{product['url']}")
                 continue
 
-            # ÇANTA MI KIYAFET Mİ?
             is_target_found = False
+            found_sizes = []
             if product.get('is_one_size'):
                 is_target_found = (data['availability'] == 'in_stock')
             else:
                 if 'HEPSI' in product['target_sizes']:
-                    if data['availability'] == 'in_stock': is_target_found = True
+                    if data['availability'] == 'in_stock': is_target_found = True; found_sizes = data['sizes']
                 else:
-                    found = [s for s in data['sizes'] if s.upper() in product['target_sizes']]
-                    if found: is_target_found = True
+                    found_sizes = [s for s in data['sizes'] if s.upper() in product['target_sizes']]
+                    if found_sizes: is_target_found = True
             
             current_status = 'in_stock_target' if is_target_found else 'out_of_stock'
 
